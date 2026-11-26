@@ -1,0 +1,19 @@
+[package]
+name = "brio_cli"
+version.workspace = true
+description = "The `brio` command: the Brio language toolchain"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "brio"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
