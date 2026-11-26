@@ -25,6 +25,12 @@ This adds a line with your real name and email:
 Signed-off-by: Jane Doe <jane@example.com>
 ```
 
+The repository's hook adds it for you once you turn the hooks on:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 A check on every pull request rejects commits without a sign-off. To fix earlier commits on your branch, run `git rebase --signoff main` and push again.
 
 ## Licenses of contributions
