@@ -1,0 +1,3 @@
+# Every text file has LF line endings on every platform: the tests compare
+# the output of `brio` with text in the source, byte for byte.
+* text=auto eol=lf
