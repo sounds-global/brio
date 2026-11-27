@@ -16,8 +16,9 @@ use crate::payload::{self, InvalidPayloadKind, Payload, PayloadType};
 use crate::schema::{list_schema, object_schema, reference};
 use crate::stage::{self, StageIdentity};
 use crate::{
-    Element, ElementTable, PayloadSchema, Reason, RecordInputs, RecordKey, SourceSpan, StableId,
-    Stage, canonical, element, fields, hash, provenance, reason,
+    Element, ElementTable, MaskedMarker, MaskedPart, PayloadSchema, Reason, RecordInputs,
+    RecordKey, SourceSpan, StableId, Stage, canonical, element, fields, hash, mask, provenance,
+    reason,
 };
 
 /// The JSON name of the envelope version.
@@ -258,13 +259,25 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
         });
     }
     for reason in &element.reasons {
-        let depth = canonical::depth(&reason.because);
+        let depth = canonical::depth(reason.because());
         if depth > MAX_REASON_DEPTH {
             return Err(RecordRefusal::ReasonTooDeep {
                 element: element.id.clone(),
                 depth,
             });
         }
+    }
+    let in_the_payload = element.misplaced_marker();
+    let in_a_reason = element.reasons.iter().find_map(Reason::misplaced_marker);
+    let misplaced = in_the_payload
+        .map(|marker| (MaskedPart::Payload, marker))
+        .or(in_a_reason.map(|marker| (MaskedPart::Reason, marker)));
+    if let Some((part, marker)) = misplaced {
+        return Err(RecordRefusal::MisplacedMaskedMarker {
+            element: element.id.clone(),
+            part,
+            marker: marker.clone(),
+        });
     }
     Ok(())
 }
@@ -333,6 +346,17 @@ pub enum RecordRefusal {
         /// The source file as named.
         file: String,
     },
+    /// A masked marker of an element, or of one of its reasons, names a
+    /// place where no value was masked: there was nothing to mask, there is
+    /// no such place, or a value is there.
+    MisplacedMaskedMarker {
+        /// The element.
+        element: StableId,
+        /// The part of the element the marker is about.
+        part: MaskedPart,
+        /// The marker.
+        marker: MaskedMarker,
+    },
     /// Two elements of the record have one stable identifier.
     DuplicateElement {
         /// The stable identifier of both.
@@ -376,6 +400,15 @@ impl fmt::Display for RecordRefusal {
                 f,
                 "the element `{element}` comes from the source file `{file}`, named by an \
                  absolute path, which a record never holds"
+            ),
+            Self::MisplacedMaskedMarker {
+                element,
+                part,
+                marker,
+            } => write!(
+                f,
+                "the element `{element}` has a masked marker at `{marker}` in {part}, where no \
+                 value was masked"
             ),
             Self::DuplicateElement { element } => {
                 write!(f, "two elements have the stable identifier `{element}`")
@@ -481,6 +514,7 @@ fn definitions() -> Map<String, Value> {
     definitions.insert(element::ID_DEFINITION.to_owned(), element::id_schema());
     definitions.insert(element::DEFINITION.to_owned(), element::schema());
     definitions.insert(reason::DEFINITION.to_owned(), reason::schema());
+    definitions.insert(mask::DEFINITION.to_owned(), mask::schema());
     definitions
 }
 

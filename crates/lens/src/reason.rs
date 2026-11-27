@@ -3,6 +3,7 @@
 //! Reasons: why a phase decided what it decided.
 
 use crate::json::{Value, json};
+use crate::mask::{self, MaskedMarker, MaskedMarkers};
 use crate::schema::{list_schema, object_schema, text_schema};
 use crate::{ElementLink, envelope, fields, provenance};
 
@@ -10,6 +11,8 @@ use crate::{ElementLink, envelope, fields, provenance};
 const DECISION: &str = "decision";
 /// The JSON name of the justification of a reason.
 const BECAUSE: &str = "because";
+/// The JSON name of the masked markers of a reason.
+const MASKED: &str = mask::MASKED;
 /// The JSON name of the elements a reason involves.
 const INVOLVES: &str = "involves";
 
@@ -18,15 +21,20 @@ const INVOLVES: &str = "involves";
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reason {
     /// The decision: the phase's name for what it decided, such as
-    /// `inferred type`.
+    /// `inferred type`. Never a confidential value: nothing masks it.
     pub decision: String,
-    /// What justifies the decision, in the phase's own form: the candidates
-    /// considered, the constraints, the rule applied. It nests at most
-    /// [`Reason::MAX_DEPTH`] levels.
-    pub because: Value,
+    /// What justifies the decision. It is set when the reason is made and
+    /// never changed after, so a masked marker always names a place where a
+    /// value was masked.
+    because: Value,
     /// The elements the justification is about, such as both accesses of a
     /// rejected borrow. Lens can find them, in any record.
     pub involves: Vec<ElementLink>,
+    /// Where a value of the justification was masked.
+    masked: MaskedMarkers,
+    /// The first masked marker the phase asked for where the justification
+    /// did not hold what it said. A reason read from a record has none.
+    mismarked: Option<MaskedMarker>,
 }
 
 impl Reason {
@@ -35,14 +43,66 @@ impl Reason {
     /// back.
     pub const MAX_DEPTH: usize = envelope::MAX_REASON_DEPTH;
 
-    /// The reason for `decision`, justified by `because`.
+    /// The reason for `decision`, justified by `because`: the candidates
+    /// considered, the constraints, the rule applied, in the phase's own
+    /// form. It nests at most [`Reason::MAX_DEPTH`] levels.
     #[must_use]
     pub fn new(decision: &str, because: Value) -> Self {
         Self {
             decision: decision.to_owned(),
             because,
             involves: Vec::new(),
+            masked: MaskedMarkers::default(),
+            mismarked: None,
         }
+    }
+
+    /// This reason, with the value at `place` in its justification masked.
+    ///
+    /// `place` is the path to the value in the justification, as for
+    /// [`Element::masked_at`](crate::Element::masked_at). The value is
+    /// dropped here, so its content is in no record.
+    #[must_use]
+    pub fn masked_at(mut self, place: &[&str]) -> Self {
+        let mismarked = self.masked.mask(&mut self.because, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
+        self
+    }
+
+    /// This reason, with the value at `place` in its justification masked
+    /// before: the justification holds null there already, as for
+    /// [`Element::still_masked_at`](crate::Element::still_masked_at).
+    #[must_use]
+    pub fn still_masked_at(mut self, place: &[&str]) -> Self {
+        let mismarked = self.masked.keep(&self.because, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
+        self
+    }
+
+    /// What justifies the decision, in the phase's own form.
+    #[must_use]
+    pub fn because(&self) -> &Value {
+        &self.because
+    }
+
+    /// Whether the value at `place` in the justification was masked, alone
+    /// or with a value it is inside.
+    #[must_use]
+    pub fn is_masked(&self, place: &[&str]) -> bool {
+        self.masked.has(place)
+    }
+
+    /// The masked markers of the justification: every place where a value
+    /// was masked, in the order of their text.
+    pub fn masked(&self) -> impl Iterator<Item = &MaskedMarker> {
+        self.masked.iter()
+    }
+
+    /// A masked marker of this reason that names a place where no value of
+    /// its justification was masked.
+    pub(crate) fn misplaced_marker(&self) -> Option<&MaskedMarker> {
+        self.masked
+            .misplaced_in(&self.because, self.mismarked.as_ref())
     }
 
     /// This reason, with a justification that is also about the element
@@ -58,6 +118,7 @@ impl Reason {
         fields::object([
             (DECISION, Value::from(self.decision.as_str())),
             (BECAUSE, self.because.clone()),
+            (MASKED, self.masked.to_json()),
             (INVOLVES, fields::list(&self.involves, ElementLink::to_json)),
         ])
     }
@@ -67,6 +128,8 @@ impl Reason {
         Some(Self {
             decision: reason.get(DECISION)?.as_str()?.to_owned(),
             because: reason.get(BECAUSE)?.clone(),
+            masked: MaskedMarkers::from_json(reason.get(MASKED)?)?,
+            mismarked: None,
             involves: fields::list_from(reason.get(INVOLVES)?, ElementLink::from_json)?,
         })
     }
@@ -90,6 +153,7 @@ pub(crate) fn schema() -> Value {
                     "description": "What justifies the decision, in the form the phase defines."
                 }),
             ),
+            (MASKED, mask::list_schema_for("the justification")),
             (
                 INVOLVES,
                 list_schema(

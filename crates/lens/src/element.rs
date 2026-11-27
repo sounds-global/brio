@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use crate::json::{Map, Value, json};
+use crate::mask::{self, MaskedMarker, MaskedMarkers};
 use crate::provenance::{self, OriginStep, Provenance};
 use crate::schema::{list_schema, object_schema, reference};
 use crate::{ElementLink, Reason, SourceSpan, StableId, fields, reason};
@@ -15,7 +16,8 @@ const PARENT: &str = "parent";
 const CHILDREN: &str = "children";
 /// The JSON name of the payload of an element.
 const PAYLOAD: &str = "payload";
-
+/// The JSON name of the masked markers of an element.
+const MASKED: &str = mask::MASKED;
 /// The JSON name of the provenance of an element.
 const PROVENANCE: &str = "provenance";
 /// The JSON name of the reasons of an element.
@@ -33,6 +35,10 @@ pub struct Element {
     pub(crate) parent: Option<StableId>,
     pub(crate) children: Vec<StableId>,
     pub(crate) payload: Value,
+    pub(crate) masked: MaskedMarkers,
+    /// The first masked marker the phase asked for where the payload did
+    /// not hold what it said. An element read from a record has none.
+    mismarked: Option<MaskedMarker>,
     pub(crate) provenance: Provenance,
     pub(crate) reasons: Vec<Reason>,
 }
@@ -53,9 +59,49 @@ impl Element {
             parent: None,
             children: Vec::new(),
             payload,
+            masked: MaskedMarkers::default(),
+            mismarked: None,
             provenance: Provenance::default(),
             reasons: Vec::new(),
         }
+    }
+
+    /// This element, with the value at `place` in its payload masked.
+    ///
+    /// A phase calls this for every value of a `Secret` or `Sensitive` type
+    /// in the payload. `place` is the path to the value, from the outside
+    /// in, by name and by position in a list, such as `["value"]` or
+    /// `["arguments", "0"]`. The value is dropped here, so its content is in
+    /// no record: the record holds null at `place`, and a masked marker that
+    /// names it. What is inside a masked value is masked with it.
+    ///
+    /// The record writer refuses the record when the payload holds nothing
+    /// at `place`: the value to mask is then somewhere else. A value that
+    /// was masked before is marked with [`Element::still_masked_at`].
+    ///
+    /// Only the payload and the justification of a reason can be masked: a
+    /// confidential value never goes in a stable identifier, in the
+    /// provenance or in the decision of a reason.
+    #[must_use]
+    pub fn masked_at(mut self, place: &[&str]) -> Self {
+        let mismarked = self.masked.mask(&mut self.payload, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
+        self
+    }
+
+    /// This element, with the value at `place` in its payload masked
+    /// before: the payload holds null there already.
+    ///
+    /// A phase calls this when it makes an element again from a record it
+    /// read, where the value is gone. `place` is the path that
+    /// [`Element::masked_at`] takes. The record writer refuses the record
+    /// when the payload holds a value at `place`: that value is masked with
+    /// [`Element::masked_at`].
+    #[must_use]
+    pub fn still_masked_at(mut self, place: &[&str]) -> Self {
+        let mismarked = self.masked.keep(&self.payload, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
+        self
     }
 
     /// This element, which comes from the source text at `span`.
@@ -129,6 +175,28 @@ impl Element {
         &self.payload
     }
 
+    /// Whether the value at `place` in the payload was masked, alone or
+    /// with a value it is inside: the payload holds null in place of a
+    /// confidential value. `place` is the path that
+    /// [`Element::masked_at`] takes.
+    #[must_use]
+    pub fn is_masked(&self, place: &[&str]) -> bool {
+        self.masked.has(place)
+    }
+
+    /// The masked markers of the payload: every place where a value was
+    /// masked, in the order of their text.
+    pub fn masked(&self) -> impl Iterator<Item = &MaskedMarker> {
+        self.masked.iter()
+    }
+
+    /// A masked marker of this element that names a place where no value
+    /// of its payload was masked.
+    pub(crate) fn misplaced_marker(&self) -> Option<&MaskedMarker> {
+        self.masked
+            .misplaced_in(&self.payload, self.mismarked.as_ref())
+    }
+
     /// Where this element comes from.
     #[must_use]
     pub fn provenance(&self) -> &Provenance {
@@ -151,6 +219,7 @@ impl Element {
             ),
             (CHILDREN, fields::list(&self.children, StableId::to_json)),
             (PAYLOAD, self.payload.clone()),
+            (MASKED, self.masked.to_json()),
             (PROVENANCE, self.provenance.to_json()),
             (REASONS, fields::list(&self.reasons, Reason::to_json)),
         ])
@@ -168,6 +237,8 @@ impl Element {
             parent,
             children: fields::list_from(element.get(CHILDREN)?, StableId::from_json)?,
             payload: element.get(PAYLOAD)?.clone(),
+            masked: MaskedMarkers::from_json(element.get(MASKED)?)?,
+            mismarked: None,
             provenance: Provenance::from_json(element.get(PROVENANCE)?)?,
             reasons: fields::list_from(element.get(REASONS)?, Reason::from_json)?,
         })
@@ -316,6 +387,7 @@ pub(crate) fn schema() -> Value {
                                     its payload kind defines."
                 }),
             ),
+            (MASKED, mask::list_schema_for("the payload")),
             (PROVENANCE, reference(provenance::DEFINITION)),
             (
                 REASONS,
