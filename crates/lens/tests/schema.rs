@@ -2,8 +2,8 @@
 
 //! Schema assembly, through the public interface of `brio_lens`.
 
+use brio_lens::json::{self, Value, json};
 use brio_lens::{Payload, PayloadSchema, Schema, SchemaError};
-use serde_json::{Value, json};
 
 /// A payload no phase owns: declared here, outside `brio_lens`.
 struct Probe;
@@ -27,7 +27,7 @@ fn assembled_schema_includes_the_payload_fragment_and_the_combined_version() {
 
     assert_eq!(schema.version().to_string(), "1+probe.3");
 
-    let document: Value = serde_json::from_str(&schema.to_json()).expect("the schema is JSON");
+    let document: Value = json::from_str(&schema.to_json()).expect("the schema is JSON");
     assert_eq!(document["version"], "1+probe.3");
     assert_eq!(
         document["oneOf"],

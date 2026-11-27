@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde_json::{Map, Value, json};
+use crate::json::{Map, Value, json};
 
 use crate::PayloadSchema;
 

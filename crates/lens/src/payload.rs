@@ -2,7 +2,7 @@
 
 //! The payload contract a phase implements.
 
-use serde_json::Value;
+use crate::json::Value;
 
 /// What a phase declares for each payload type it records.
 ///
@@ -20,6 +20,8 @@ pub trait Payload {
     const VERSION: u32;
 
     /// The JSON Schema of this payload, as it appears in the published schema.
+    ///
+    /// Build it with [`json!`](crate::json::json) from [`crate::json`].
     fn schema_fragment() -> Value;
 }
 
