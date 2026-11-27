@@ -29,7 +29,10 @@ pub trait PayloadType {
     /// The JSON Schema of the payload of one element, as it appears in the
     /// published schema.
     ///
-    /// Build it with [`json!`](crate::json::json) from [`crate::json`].
+    /// Build it with [`json!`](crate::json::json) from [`crate::json`]. Where
+    /// a value can be masked with [`masked`](crate::masked), the fragment
+    /// admits `{ "$ref": "#/$defs/masked" }` in its place. The name `$masked`
+    /// belongs to that marker: a payload has no other object with it.
     fn schema_fragment() -> Value;
 }
 

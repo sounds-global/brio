@@ -64,6 +64,18 @@ _Avoid_: history, derivation
 The recorded justification for one decision a phase made about an element, such as the constraints behind an inferred type.
 _Avoid_: explanation, rationale
 
+**Masked value**:
+A confidential value, such as one of a `Secret` or `Sensitive` type, that a phase keeps out of a record. The record holds a **Masked marker** in its place.
+_Avoid_: redacted value, hidden value
+
+**Masked marker**:
+What a record holds in place of a **Masked value**. It says that a value was there and holds nothing of it.
+_Avoid_: placeholder, redaction
+
+**Disabled writer**:
+The record writer of a build with **Lens** off. It drops every record and does no work for it.
+_Avoid_: null writer, no-op writer
+
 **Stage test**:
 A comparison of a test program's **Stage records** against reviewed reference records.
 _Avoid_: snapshot test, golden test

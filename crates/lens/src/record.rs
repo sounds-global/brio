@@ -71,10 +71,14 @@ fn record_path(records_directory: &Path, key: &RecordKey) -> PathBuf {
     records_directory.join(format!("{key}.json"))
 }
 
-/// Writes records into a build directory.
+/// Writes records into a build directory, or, when Lens is off, drops them.
+///
+/// A phase hands every record to its writer, whether Lens is on or off: the
+/// [disabled](RecordWriter::disabled) writer does no work for a record.
 #[derive(Debug)]
 pub struct RecordWriter {
-    directory: PathBuf,
+    /// Where the records are kept, or `None` when Lens is off.
+    directory: Option<PathBuf>,
 }
 
 impl RecordWriter {
@@ -82,12 +86,21 @@ impl RecordWriter {
     #[must_use]
     pub fn in_build_directory(build_directory: impl Into<PathBuf>) -> Self {
         Self {
-            directory: records_directory(build_directory.into()),
+            directory: Some(records_directory(build_directory.into())),
         }
     }
 
+    /// The writer of a build with Lens off. It drops every record and does
+    /// no work for it: it never asks a payload for its elements, and it
+    /// serializes, hashes and writes nothing.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self { directory: None }
+    }
+
     /// Writes the record of what `stage` produced, as `payload`, from
-    /// `inputs`, and gives the file it was written to.
+    /// `inputs`, and gives the file it was written to, or `None` when this
+    /// is the [disabled](RecordWriter::disabled) writer.
     ///
     /// The record is canonical JSON: the same stage, inputs and payload give
     /// the same bytes in the same place under the build directory.
@@ -95,16 +108,19 @@ impl RecordWriter {
     /// # Errors
     ///
     /// Fails when Lens refuses to make the record, for a [`RecordRefusal`],
-    /// or when the file cannot be written.
+    /// or when the file cannot be written. The disabled writer never fails.
     pub fn write<P: Payload>(
         &self,
         stage: &Stage<P>,
         inputs: &RecordInputs,
         payload: &P,
-    ) -> Result<PathBuf, WriteError> {
+    ) -> Result<Option<PathBuf>, WriteError> {
+        let Some(directory) = &self.directory else {
+            return Ok(None);
+        };
         let (envelope, text) = Envelope::seal(stage, inputs, payload)?;
 
-        let path = record_path(&self.directory, envelope.key());
+        let path = record_path(directory, envelope.key());
         // A reader never sees half a record: the file appears under its
         // name only once it is complete. Its name until then is its
         // writer's alone, so two writers of one record never share it.
@@ -114,7 +130,7 @@ impl RecordWriter {
             std::process::id(),
             WRITES.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&self.directory)
+        fs::create_dir_all(directory)
             .and_then(|()| fs::write(&unfinished, text))
             .and_then(|()| fs::rename(&unfinished, &path))
             .map_err(|error| {
@@ -126,7 +142,7 @@ impl RecordWriter {
                     error,
                 }
             })?;
-        Ok(path)
+        Ok(Some(path))
     }
 }
 

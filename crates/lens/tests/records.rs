@@ -146,7 +146,8 @@ fn identical_input_gives_byte_identical_records() {
                 &inputs("sensor a\n"),
                 &probe(&[("a", 7)]),
             )
-            .expect("the record is written");
+            .expect("the record is written")
+            .expect("Lens is on");
         let relative = path
             .strip_prefix(&build_directory)
             .expect("the record is in the build directory")
@@ -196,7 +197,8 @@ fn records_are_written_under_the_build_directory_and_nowhere_else() {
             &inputs("sensor a\n"),
             &probe(&[("a", 7)]),
         )
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
 
     assert!(path.starts_with(&build_directory));
     assert_eq!(files_under(&workspace), [path]);
@@ -243,7 +245,8 @@ fn a_corrupted_record_is_rejected_not_trusted() {
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
         .write(&stage, &inputs, &probe(&[("a", 7)]))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
     let reader = RecordReader::in_build_directory(&build_directory);
 
     tamper(&path, r#""value": 7"#, r#""value": 8"#);
@@ -296,7 +299,8 @@ fn an_unsupported_envelope_version_is_rejected_naming_the_found_and_supported_ve
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
         .write(&stage, &inputs, &probe(&[("a", 7)]))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
 
     assert_eq!(Envelope::VERSION, 1);
     tamper(
@@ -391,7 +395,8 @@ fn the_digest_of_a_record_is_the_one_the_published_schema_describes() {
             &inputs("sensor a\n"),
             &probe(&[("a", 7)]),
         )
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
 
     let text = fs::read_to_string(path).expect("the record can be read");
 
@@ -405,7 +410,8 @@ fn a_record_the_writer_would_refuse_is_rejected_even_with_a_matching_digest() {
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
         .write(&stage, &inputs, &probe(&[("a", 7)]))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
     let reader = RecordReader::in_build_directory(&build_directory);
     let text = fs::read_to_string(&path).expect("the record can be read");
 
@@ -453,10 +459,12 @@ fn a_stale_record_is_rejected_not_trusted() {
     let new_inputs = inputs("sensor a\nsensor b\n");
     let old_path = writer
         .write(&stage, &old_inputs, &probe(&[("a", 7)]))
-        .expect("the old record is written");
+        .expect("the old record is written")
+        .expect("Lens is on");
     let new_path = writer
         .write(&stage, &new_inputs, &probe(&[("a", 7), ("b", 1)]))
-        .expect("the new record is written");
+        .expect("the new record is written")
+        .expect("Lens is on");
 
     // The record of the old inputs now sits where the new inputs' record belongs.
     fs::copy(&old_path, &new_path).expect("the old record can be copied");
@@ -485,7 +493,8 @@ fn a_record_that_cannot_be_read_hides_no_other_record() {
         .expect("the gauge record is written");
     let probe_path = writer
         .write(&stage::<Probe>("app::main"), &inputs, &probe(&[("a", 7)]))
-        .expect("the probe record is written");
+        .expect("the probe record is written")
+        .expect("Lens is on");
     tamper(&probe_path, r#""value": 7"#, r#""value": 8"#);
     fs::write(build_directory.join("lens").join("notes.json"), "{}\n")
         .expect("a foreign file can be added");
@@ -558,7 +567,8 @@ fn an_elements_payload_is_read_back_at_the_deepest_nesting_and_refused_beyond_it
 
     let path = writer
         .write(&stage, &inputs, &Nest(124))
-        .expect("the deepest payload is written");
+        .expect("the deepest payload is written")
+        .expect("Lens is on");
     let record = RecordReader::in_build_directory(&build_directory)
         .read(&stage, &inputs)
         .expect("the deepest payload is read");
@@ -612,7 +622,8 @@ fn a_write_that_fails_leaves_nothing_behind() {
     let inputs = inputs("sensor a\n");
     let path = writer
         .write(&stage, &inputs, &probe(&[("a", 7)]))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
     // A directory where the record belongs: nothing can be renamed onto it.
     fs::remove_file(&path).expect("the record can be removed");
     fs::create_dir(&path).expect("a directory can take its place");
@@ -669,7 +680,8 @@ fn an_element_names_its_parent_and_lists_its_children_in_order() {
     let stage = stage::<Loose>("app::main");
     RecordWriter::in_build_directory(&build_directory)
         .write(&stage, &inputs("sensor a\n"), &Loose(outline))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
 
     let envelopes = envelopes("outline");
     let elements = envelopes[0].elements();
@@ -709,7 +721,8 @@ fn a_record_of_another_module_under_the_right_record_key_is_rejected() {
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
         .write(&stage, &inputs, &probe(&[("a", 7)]))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
     let text = fs::read_to_string(&path).expect("the record can be read");
 
     // A whole record, with a digest to match, that says it is for another
@@ -825,7 +838,8 @@ fn a_record_whose_element_table_breaks_its_rules_is_rejected_even_with_a_matchin
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
         .write(&stage, &inputs, &Loose(outline))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
     let reader = RecordReader::in_build_directory(&build_directory);
     let text = fs::read_to_string(&path).expect("the record can be read");
     let whole: Value = brio_lens::json::from_str(&text).expect("the record is JSON");
@@ -923,4 +937,50 @@ fn elements_read_from_a_record_can_be_written_again_and_read_back() {
             .map(|e| e.children().to_vec())
     };
     assert_eq!(children(&again), children(&read));
+}
+
+#[test]
+fn the_disabled_writer_writes_nothing() {
+    let workspace = workspace("lens_off");
+
+    let written = RecordWriter::disabled()
+        .write(
+            &stage::<Probe>("app::main"),
+            &inputs("sensor a\n"),
+            &probe(&[("a", 7)]),
+        )
+        .expect("nothing is refused");
+
+    assert_eq!(written, None);
+    assert_eq!(files_under(&workspace), [] as [PathBuf; 0]);
+}
+
+#[test]
+fn the_disabled_writer_does_no_work_for_a_record() {
+    // The elements of a payload are where serialization and hashing start:
+    // every stable identifier is a hash. The disabled writer never asks for
+    // them, so it accepts even what an enabled writer refuses.
+    let written = RecordWriter::disabled()
+        .write(
+            &stage::<Loose>("app::main"),
+            &inputs("sensor a\n"),
+            &Loose(|_| panic!("the disabled writer asks a payload for its elements")),
+        )
+        .expect("nothing is refused");
+    assert_eq!(written, None);
+
+    let twice = |stage: &Stage<Loose>| {
+        vec![
+            Element::new(stage.id(&["sensor", "a"]), json!("a")),
+            Element::new(stage.id(&["sensor", "a"]), json!("a")),
+        ]
+    };
+    let written = RecordWriter::disabled()
+        .write(
+            &stage::<Loose>("app::main"),
+            &inputs("sensor a\n"),
+            &Loose(twice),
+        )
+        .expect("nothing is refused");
+    assert_eq!(written, None);
 }

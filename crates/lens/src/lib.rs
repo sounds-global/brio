@@ -3,14 +3,18 @@
 //! Brio Lens: the envelope shared by every stage record and execution record.
 //!
 //! This crate owns stable identifiers, the element table, provenance,
-//! reasons, content-hash keys and versioning. Each phase crate defines its
-//! own payload types against it.
+//! reasons, content-hash keys, masked markers and versioning. Each phase
+//! crate defines its own payload types against it.
 //!
 //! A phase declares a payload type with [`PayloadType`], and says how its
 //! payload is made of elements with [`Payload`]. It enters Lens once for
 //! each module, with [`Stage::of`], and hands the stage and its payload to a
 //! [`RecordWriter`]. Any tool reads the records back with a [`RecordReader`],
 //! with or without knowing their payload types.
+//!
+//! A phase keeps a confidential value out of its records with [`masked`].
+//! When Lens is off, it hands its records to [`RecordWriter::disabled`],
+//! which drops them and does no work.
 
 mod canonical;
 mod element;
@@ -19,6 +23,7 @@ mod fields;
 mod hash;
 mod identity;
 mod inputs;
+mod mask;
 mod payload;
 mod provenance;
 mod reason;
@@ -37,6 +42,7 @@ pub use element::{Element, ElementTable};
 pub use envelope::{Envelope, RecordDefect, RecordRefusal};
 pub use identity::StableId;
 pub use inputs::{RecordInputs, RecordKey};
+pub use mask::{is_masked, masked};
 pub use payload::{InvalidPayloadKind, Payload, PayloadSchema, PayloadType};
 pub use provenance::{ElementLink, OriginStep, Provenance, SourceSpan};
 pub use reason::Reason;

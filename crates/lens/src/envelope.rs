@@ -17,7 +17,7 @@ use crate::schema::{list_schema, object_schema, reference};
 use crate::stage::{self, StageIdentity};
 use crate::{
     Element, ElementTable, PayloadSchema, Reason, RecordInputs, RecordKey, SourceSpan, StableId,
-    Stage, canonical, element, fields, hash, provenance, reason,
+    Stage, canonical, element, fields, hash, mask, provenance, reason,
 };
 
 /// The JSON name of the envelope version.
@@ -250,6 +250,11 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
             depth,
         });
     }
+    if mask::has_malformed_marker(&element.payload) {
+        return Err(RecordRefusal::MalformedMaskedMarker {
+            element: element.id.clone(),
+        });
+    }
     let from_an_absolute_path = |span: &&SourceSpan| is_absolute_path(&span.file);
     if let Some(span) = element.provenance.source.iter().find(from_an_absolute_path) {
         return Err(RecordRefusal::AbsoluteSourcePath {
@@ -263,6 +268,11 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
             return Err(RecordRefusal::ReasonTooDeep {
                 element: element.id.clone(),
                 depth,
+            });
+        }
+        if mask::has_malformed_marker(&reason.because) {
+            return Err(RecordRefusal::MalformedMaskedMarker {
+                element: element.id.clone(),
             });
         }
     }
@@ -333,6 +343,13 @@ pub enum RecordRefusal {
         /// The source file as named.
         file: String,
     },
+    /// The payload or a reason of an element has an object that is named as
+    /// a masked marker and holds something else, which could be what the
+    /// marker stands for.
+    MalformedMaskedMarker {
+        /// The element.
+        element: StableId,
+    },
     /// Two elements of the record have one stable identifier.
     DuplicateElement {
         /// The stable identifier of both.
@@ -376,6 +393,12 @@ impl fmt::Display for RecordRefusal {
                 f,
                 "the element `{element}` comes from the source file `{file}`, named by an \
                  absolute path, which a record never holds"
+            ),
+            Self::MalformedMaskedMarker { element } => write!(
+                f,
+                "the element `{element}` holds an object with `{}` that is not a masked marker: \
+                 a masked marker holds nothing else",
+                mask::MASKED
             ),
             Self::DuplicateElement { element } => {
                 write!(f, "two elements have the stable identifier `{element}`")
@@ -481,6 +504,7 @@ fn definitions() -> Map<String, Value> {
     definitions.insert(element::ID_DEFINITION.to_owned(), element::id_schema());
     definitions.insert(element::DEFINITION.to_owned(), element::schema());
     definitions.insert(reason::DEFINITION.to_owned(), reason::schema());
+    definitions.insert(mask::DEFINITION.to_owned(), mask::schema());
     definitions
 }
 

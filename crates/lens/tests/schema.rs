@@ -10,7 +10,7 @@ use std::fs;
 use brio_lens::json::{self, Value, json};
 use brio_lens::{
     Element, InvalidPayloadKind, PayloadSchema, PayloadType, Reason, RecordWriter, Schema,
-    SchemaError, SourceSpan,
+    SchemaError, SourceSpan, masked,
 };
 
 use support::{Loose, inputs, stage, workspace};
@@ -296,7 +296,8 @@ fn a_written_record_has_exactly_the_fields_the_schema_describes() {
                 ]
             }),
         )
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
     let text = fs::read_to_string(path).expect("the record can be read");
     let record: Value = json::from_str(&text).expect("the record is JSON");
     let schema = envelope_schema();
@@ -349,4 +350,21 @@ fn the_schema_admits_no_field_and_no_name_that_a_reader_rejects() {
         json!({ "pattern": r"^([/\\~]|[A-Za-z]:[/\\])" })
     );
     assert_eq!(schema["$defs"]["payload_kind"]["pattern"], "^[a-z0-9_]+$");
+}
+
+#[test]
+fn the_schema_describes_the_masked_marker_as_it_is_written() {
+    let schema = envelope_schema();
+    let marker = &schema["$defs"]["masked"];
+
+    assert!(
+        !marker["description"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert_eq!(marker["additionalProperties"], false);
+    assert_eq!(fields(&masked("hunter2")), required(marker));
+    assert_eq!(marker["properties"]["$masked"], json!({ "const": true }));
+    assert_eq!(masked("hunter2"), json!({ "$masked": true }));
 }

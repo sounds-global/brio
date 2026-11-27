@@ -73,6 +73,19 @@ const ENVELOPE_SCHEMA: &str = r##"{
       ],
       "type": "object"
     },
+    "masked": {
+      "additionalProperties": false,
+      "description": "A masked marker: it stands for a confidential value, and holds nothing of it. No other object of a record has a field of this name.",
+      "properties": {
+        "$masked": {
+          "const": true
+        }
+      },
+      "required": [
+        "$masked"
+      ],
+      "type": "object"
+    },
     "origin_step": {
       "additionalProperties": false,
       "description": "One step of a chain of origin: what made a compiler-created element, and the element it was made from.",

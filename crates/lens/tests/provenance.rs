@@ -311,7 +311,8 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
                 ]
             }),
         )
-        .expect("the deepest reason is written");
+        .expect("the deepest reason is written")
+        .expect("Lens is on");
     let envelopes = envelopes("reason_nesting");
     let read = stage.link(&["a"]).resolve(&envelopes).expect("it is found");
     assert_eq!(read.reasons()[0].because, nested(122));
@@ -366,7 +367,8 @@ fn a_record_whose_provenance_the_writer_would_refuse_is_rejected_even_with_a_mat
             &inputs(SOURCE),
             &Loose(with_provenance_and_a_reason),
         )
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("Lens is on");
     let text = std::fs::read_to_string(&path).expect("the record can be read");
     let whole: Value = json::from_str(&text).expect("the record is JSON");
     assert_eq!(resealed(whole.clone()), text);
