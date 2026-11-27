@@ -3,7 +3,7 @@
 //! Schema assembly, through the public interface of `brio_lens`.
 
 use brio_lens::json::{self, Value, json};
-use brio_lens::{Payload, PayloadSchema, Schema, SchemaError};
+use brio_lens::{InvalidPayloadKind, Payload, PayloadSchema, Schema, SchemaError};
 
 /// A payload no phase owns: declared here, outside `brio_lens`.
 struct Probe;
@@ -19,11 +19,24 @@ impl Payload for Probe {
             "properties": { "reading": { "type": "integer" } }
         })
     }
+
+    fn to_json(&self) -> Value {
+        Value::Null
+    }
+
+    fn from_json(_payload: &Value) -> Option<Self> {
+        Some(Self)
+    }
+}
+
+/// What `P` declares, when its payload kind is valid.
+fn declared<P: Payload>() -> PayloadSchema {
+    PayloadSchema::of::<P>().expect("the payload kind is valid")
 }
 
 #[test]
 fn assembled_schema_includes_the_payload_fragment_and_the_combined_version() {
-    let schema = Schema::assemble([PayloadSchema::of::<Probe>()]).expect("one payload assembles");
+    let schema = Schema::assemble([declared::<Probe>()]).expect("one payload assembles");
 
     assert_eq!(schema.version().to_string(), "1+probe.3");
 
@@ -55,13 +68,21 @@ impl Payload for Gauge {
     fn schema_fragment() -> Value {
         json!({ "type": "string" })
     }
+
+    fn to_json(&self) -> Value {
+        Value::Null
+    }
+
+    fn from_json(_payload: &Value) -> Option<Self> {
+        Some(Self)
+    }
 }
 
 #[test]
 fn the_same_payload_set_gives_byte_identical_output_in_any_order() {
-    let one_way = Schema::assemble([PayloadSchema::of::<Probe>(), PayloadSchema::of::<Gauge>()])
+    let one_way = Schema::assemble([declared::<Probe>(), declared::<Gauge>()])
         .expect("two payloads assemble");
-    let other_way = Schema::assemble([PayloadSchema::of::<Gauge>(), PayloadSchema::of::<Probe>()])
+    let other_way = Schema::assemble([declared::<Gauge>(), declared::<Probe>()])
         .expect("two payloads assemble");
 
     assert_eq!(one_way.version().to_string(), "1+gauge.1+probe.3");
@@ -79,15 +100,20 @@ impl Payload for Impostor {
     fn schema_fragment() -> Value {
         json!({ "type": "null" })
     }
+
+    fn to_json(&self) -> Value {
+        Value::Null
+    }
+
+    fn from_json(_payload: &Value) -> Option<Self> {
+        Some(Self)
+    }
 }
 
 #[test]
 fn two_payloads_of_one_payload_kind_do_not_assemble() {
-    let error = Schema::assemble([
-        PayloadSchema::of::<Probe>(),
-        PayloadSchema::of::<Impostor>(),
-    ])
-    .expect_err("one payload kind cannot have two payloads");
+    let error = Schema::assemble([declared::<Probe>(), declared::<Impostor>()])
+        .expect_err("one payload kind cannot have two payloads");
 
     assert_eq!(
         error,
@@ -111,11 +137,19 @@ impl Payload for Label {
     fn schema_fragment() -> Value {
         json!({ "type": "string", "minLength": 1, "description": "A label." })
     }
+
+    fn to_json(&self) -> Value {
+        Value::Null
+    }
+
+    fn from_json(_payload: &Value) -> Option<Self> {
+        Some(Self)
+    }
 }
 
 #[test]
 fn object_keys_are_written_in_sorted_order_whatever_order_a_fragment_declares() {
-    let schema = Schema::assemble([PayloadSchema::of::<Label>()]).expect("one payload assembles");
+    let schema = Schema::assemble([declared::<Label>()]).expect("one payload assembles");
 
     let json = schema.to_json();
     let fragment = &json[json
@@ -136,21 +170,29 @@ impl Payload for Dotted {
     fn schema_fragment() -> Value {
         json!({ "type": "null" })
     }
+
+    fn to_json(&self) -> Value {
+        Value::Null
+    }
+
+    fn from_json(_payload: &Value) -> Option<Self> {
+        Some(Self)
+    }
 }
 
 #[test]
-fn a_payload_kind_with_other_than_lowercase_letters_digits_and_underscores_does_not_assemble() {
-    let error = Schema::assemble([PayloadSchema::of::<Dotted>()])
+fn a_payload_kind_with_other_than_lowercase_letters_digits_and_underscores_does_not_enter_lens() {
+    let error = PayloadSchema::of::<Dotted>()
         .expect_err("the kind would read as two payloads in the version");
 
     assert_eq!(
         error,
-        SchemaError::InvalidPayloadKind {
+        InvalidPayloadKind {
             payload_kind: "probe.3+gauge"
         }
     );
     assert_eq!(
         error.to_string(),
-        "the payload kind `probe.3+gauge` has characters other than lowercase letters, digits and `_`"
+        "the payload kind `probe.3+gauge` is not made of lowercase letters, digits and `_`"
     );
 }

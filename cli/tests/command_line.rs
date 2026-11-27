@@ -8,8 +8,21 @@ use std::process::{Command, Output};
 const ENVELOPE_SCHEMA: &str = r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "digest": {
+      "description": "The BLAKE3 of this record without this field, as JSON text with sorted keys, an indent of two spaces and a final newline.",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
     "envelope_version": {
       "const": 1
+    },
+    "key": {
+      "description": "The record key: the BLAKE3 of every input of the record. A record is stored under its key.",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "module": {
+      "type": "string"
     },
     "payload": {},
     "payload_kind": {
@@ -22,9 +35,12 @@ const ENVELOPE_SCHEMA: &str = r#"{
   },
   "required": [
     "envelope_version",
+    "key",
+    "module",
     "payload_kind",
     "payload_version",
-    "payload"
+    "payload",
+    "digest"
   ],
   "title": "Brio Lens record",
   "type": "object",

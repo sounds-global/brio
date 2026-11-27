@@ -24,6 +24,22 @@ _Avoid_: body, content
 The name that identifies one payload type in every record and in the published schema, such as `tokens`. Unique within a toolchain.
 _Avoid_: stage kind, record type
 
+**Envelope**:
+The part of a record that every phase shares: its versions, its **Record key**, the module it is for, the **Payload kind** and a digest that guards the whole record. It wraps the **Payload**.
+_Avoid_: header, wrapper
+
+**Record key**:
+The content-hash key a record is stored under: a hash of the stage, the module and its inputs, the toolchain version, the target and the build settings.
+_Avoid_: cache key, record hash
+
+**Digest**:
+The hash of a record's own text, written in the record, by which a reader detects a corrupted record. Unlike the **Record key**, it covers what the stage produced, not what it was computed from.
+_Avoid_: checksum, content hash
+
+**Stable identifier**:
+The name of one element of a **Stage record**, derived from its module, the stage that produced it and its place in that stage's structure. The same in every build, whatever else changes in the input.
+_Avoid_: element ID, node ID
+
 **Provenance**:
 The links from an element of a **Stage record** back to the source text and to the elements of the previous stage it derives from.
 _Avoid_: lineage, ancestry
