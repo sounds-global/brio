@@ -489,9 +489,9 @@ fn a_record_that_cannot_be_read_hides_no_other_record() {
         .map(|record| record.envelope.payload_kind())
         .collect();
     assert_eq!(whole, ["gauge"]);
-    let count = |unread: fn(&ReadError) -> bool| {
+    let count = |is_counted: fn(&ReadError) -> bool| {
         let errors = records.iter().filter_map(|record| record.as_ref().err());
-        errors.filter(|error| unread(error)).count()
+        errors.filter(|error| is_counted(error)).count()
     };
     let corrupted = count(|error| {
         matches!(
@@ -1114,4 +1114,33 @@ fn writing_a_record_again_puts_it_in_the_place_of_a_corrupted_one() {
 
     assert_eq!(fs::read(&path).expect("the record can be read"), whole);
     assert_eq!(files_under(&workspace), [path]);
+}
+
+#[test]
+fn a_record_is_never_written_through_a_name_a_stopped_writer_left() {
+    let workspace = workspace("stopped_writer");
+    let build_directory = workspace.join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+    let whole = fs::read(&path).expect("the record can be read");
+    // A reader that has the record open: another name of the same file.
+    let open_record = workspace.join("open-record");
+    fs::hard_link(&path, &open_record).expect("the record can be given a second name");
+    // What a writer leaves when it is stopped once its record is in place:
+    // its unfinished name, still a name of the record. The next writers of
+    // this process make the same names.
+    for writer in 0..2000 {
+        let left = path.with_extension(format!("{}-{writer}.unfinished", std::process::id()));
+        fs::hard_link(&path, left).expect("the record can be given a second name");
+    }
+
+    // The same record key, and another payload.
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 8)]));
+
+    assert_eq!(
+        fs::read(&open_record).expect("the open record can be read"),
+        whole
+    );
+    assert_ne!(fs::read(&path).expect("the record can be read"), whole);
 }

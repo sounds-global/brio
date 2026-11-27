@@ -5,7 +5,7 @@
 use std::borrow::Borrow;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -106,9 +106,23 @@ fn is_unfinished_name(name: &str) -> bool {
     parts().is_some_and(|(key, process, writer)| unfinished_name(&key, process, writer) == name)
 }
 
-/// Whether the record with the text `text` is kept in `file` already.
-fn is_kept(file: &Path, text: &str) -> bool {
-    fs::read(file).is_ok_and(|kept| kept == text.as_bytes())
+/// Whether `file` holds the record with the text `text`, whole.
+fn holds_record(file: &Path, text: &str) -> bool {
+    fs::read(file).is_ok_and(|held| held == text.as_bytes())
+}
+
+/// Writes the record with the text `text` into the new file `unfinished`.
+fn write_unfinished(unfinished: &Path, text: &str) -> io::Result<()> {
+    // A writer that was stopped once its record was in place left its
+    // unfinished name behind, as a second name of that record. The name is
+    // removed, and the file is made anew: writing into what is there would
+    // write into the record itself, under the eyes of its readers.
+    match fs::remove_file(unfinished) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut file = fs::File::create_new(unfinished)?;
+    file.write_all(text.as_bytes())
 }
 
 /// Puts the complete record in `unfinished`, with the text `text`, in its
@@ -118,11 +132,14 @@ fn put_in_place(unfinished: &Path, file: &Path, text: &str) -> io::Result<()> {
     // A second name for the same file takes the place of nothing, so no
     // record is gone for a moment. It fails when `file` is there, and where
     // the file system gives no second name to a file.
-    if fs::hard_link(unfinished, file).is_ok() || is_kept(file, text) {
+    // When it fails because another writer put the same record there
+    // meanwhile, there is nothing left to do.
+    if fs::hard_link(unfinished, file).is_ok() || holds_record(file, text) {
         return Ok(());
     }
-    // What is in the place of the record is not the record, such as a
-    // corrupted one: the record is renamed onto it.
+    // What is in the place of the record has other bytes: a corrupted
+    // record, or a record of the same record key that a stage made
+    // otherwise. The record is renamed onto it.
     fs::rename(unfinished, file)
 }
 
@@ -177,6 +194,7 @@ impl RecordWriter {
     /// the same bytes in the same place under the build directory.
     /// A record that is there already is left as it is, so a reader beside
     /// a writer of the same record is given that record at every moment.
+    /// Only a file with other bytes in the place of the record is replaced.
     ///
     /// # Errors
     ///
@@ -197,7 +215,7 @@ impl RecordWriter {
         // A record that is there already stays as it is. Nothing is put in
         // its place, not even the same record: to a reader that lists the
         // records meanwhile, a file that is replaced can be gone.
-        if is_kept(&path, &text) {
+        if holds_record(&path, &text) {
             return Ok(Some(path));
         }
         // A reader never sees half a record: the file appears under its
@@ -210,7 +228,7 @@ impl RecordWriter {
             WRITES.fetch_add(1, Ordering::Relaxed),
         ));
         let written = fs::create_dir_all(directory)
-            .and_then(|()| fs::write(&unfinished, &text))
+            .and_then(|()| write_unfinished(&unfinished, &text))
             .and_then(|()| put_in_place(&unfinished, &path, &text));
         // Nothing of an unfinished record stays behind, written or not. It
         // is gone already when it was renamed, and when the write failed,
@@ -328,8 +346,9 @@ impl RecordReader {
     /// nothing is kept beside the records, not even a `.gitkeep`.
     ///
     /// Only a record its writer has not finished is passed over: it is no
-    /// record yet. It is known by its name alone, so a record renamed to
-    /// such a name is passed over too.
+    /// record yet. It is a file with the name a writer gives it, and
+    /// nothing else tells it apart, so a record renamed to such a name is
+    /// passed over too.
     ///
     /// This reads records of any payload kind, including those of payload
     /// types the caller does not know. It does not know the inputs of any
