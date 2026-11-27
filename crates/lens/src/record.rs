@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::envelope::Unreadable;
 use crate::json::Value;
 use crate::payload::{self, InvalidPayloadKind, Payload};
-use crate::{Envelope, RecordInputs, RecordKey};
+use crate::{Envelope, RecordInputs, RecordKey, canonical};
 
 /// A record: the envelope and the payload it wraps.
 ///
@@ -87,26 +87,34 @@ impl RecordWriter {
     /// # Errors
     ///
     /// Fails when the payload kind of `P` breaks the rule on
-    /// [`Payload::KIND`], or when the file cannot be written.
+    /// [`Payload::KIND`], when the module of `inputs` is named by an
+    /// absolute path, when the payload nests deeper than
+    /// [`Envelope::MAX_PAYLOAD_DEPTH`], or when the file cannot be written.
     pub fn write<P: Payload>(
         &self,
         inputs: &RecordInputs,
         payload: &P,
     ) -> Result<PathBuf, WriteError> {
-        let payload_kind = payload::kind_of::<P>()?;
-        let envelope = Envelope {
-            key: inputs.key(payload_kind, P::VERSION),
-            module: inputs.module.clone(),
-            payload_kind: payload_kind.to_owned(),
-            payload_version: P::VERSION,
-        };
-        let text = envelope.seal(payload.to_json());
+        let envelope = Envelope::of::<P>(inputs)?;
+        if inputs.module_is_an_absolute_path() {
+            return Err(WriteError::AbsolutePath {
+                module: inputs.module.clone(),
+            });
+        }
+        let payload = payload.to_json();
+        let depth = canonical::depth(&payload);
+        if depth > Envelope::MAX_PAYLOAD_DEPTH {
+            return Err(WriteError::PayloadTooDeep {
+                payload_kind: P::KIND,
+                depth,
+            });
+        }
+        let text = envelope.seal(payload);
 
         let path = record_path(&self.directory, &envelope.key);
         // A reader never sees half a record: the file appears under its
-        // name only once it is complete.
-        // Its name until then is its writer's alone, so two writers of one
-        // record never share it.
+        // name only once it is complete. Its name until then is its
+        // writer's alone, so two writers of one record never share it.
         static WRITES: AtomicU64 = AtomicU64::new(0);
         let unfinished = path.with_extension(format!(
             "{}-{}.unfinished",
@@ -116,9 +124,14 @@ impl RecordWriter {
         fs::create_dir_all(&self.directory)
             .and_then(|()| fs::write(&unfinished, text))
             .and_then(|()| fs::rename(&unfinished, &path))
-            .map_err(|error| WriteError::Io {
-                path: path.clone(),
-                error,
+            .map_err(|error| {
+                // Nothing of a record that was not written stays behind.
+                // The write already failed, and that is the error to report.
+                let _ = fs::remove_file(&unfinished);
+                WriteError::Io {
+                    path: path.clone(),
+                    error,
+                }
             })?;
         Ok(path)
     }
@@ -130,6 +143,19 @@ impl RecordWriter {
 pub enum WriteError {
     /// The payload declares an invalid payload kind.
     InvalidPayloadKind(InvalidPayloadKind),
+    /// The module is named by an absolute path, which no record holds.
+    AbsolutePath {
+        /// The module as named in the inputs.
+        module: String,
+    },
+    /// The payload nests deeper than [`Envelope::MAX_PAYLOAD_DEPTH`], so no
+    /// reader could read the record back.
+    PayloadTooDeep {
+        /// The payload kind of the payload.
+        payload_kind: &'static str,
+        /// How deep the payload nests.
+        depth: usize,
+    },
     /// The record's file could not be written.
     Io {
         /// The file of the record.
@@ -143,6 +169,19 @@ impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPayloadKind(error) => error.fmt(f),
+            Self::AbsolutePath { module } => write!(
+                f,
+                "the module `{module}` is named by an absolute path, which a record never holds"
+            ),
+            Self::PayloadTooDeep {
+                payload_kind,
+                depth,
+            } => write!(
+                f,
+                "the `{payload_kind}` payload nests {depth} deep, but a record holds at most {} \
+                 levels",
+                Envelope::MAX_PAYLOAD_DEPTH
+            ),
             Self::Io { path, error } => {
                 write!(
                     f,
@@ -159,6 +198,7 @@ impl std::error::Error for WriteError {
         match self {
             Self::InvalidPayloadKind(error) => Some(error),
             Self::Io { error, .. } => Some(error),
+            Self::AbsolutePath { .. } | Self::PayloadTooDeep { .. } => None,
         }
     }
 }
@@ -205,11 +245,12 @@ impl RecordReader {
                 payload_kind,
             });
         }
-        read_record(&path, &key.to_string())?.typed()
+        read_record(&path, &key)?.typed()
     }
 
     /// Every record in the build directory, each with an untyped payload, in
-    /// the order of their record keys.
+    /// the order of their file names. A record that cannot be read is given
+    /// as its error, in its place, and hides no other record.
     ///
     /// This reads records of any payload kind, including those of payload
     /// types the caller does not know. It does not know the inputs of any
@@ -218,10 +259,8 @@ impl RecordReader {
     ///
     /// # Errors
     ///
-    /// Fails when the build directory cannot be read, when a record is
-    /// corrupted or stale, or when its envelope version is not
-    /// [`Envelope::VERSION`].
-    pub fn read_all(&self) -> Result<Vec<Record<Value>>, ReadError> {
+    /// Fails when the build directory cannot be listed.
+    pub fn read_all(&self) -> Result<Vec<Result<Record<Value>, ReadError>>, ReadError> {
         if !self.directory.exists() {
             return Ok(Vec::new());
         }
@@ -241,18 +280,19 @@ impl RecordReader {
         }
         paths.sort();
 
-        paths
-            .iter()
-            .map(|path| {
-                let stored_under = path.file_stem().unwrap_or_default().to_string_lossy();
-                read_record(path, &stored_under)
-            })
-            .collect()
+        let read = |path: &PathBuf| {
+            // A record is stored under its record key and under no other name.
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+            let stored_under = RecordKey::from_hex(name.into_owned())
+                .ok_or_else(|| ReadError::Corrupted { path: path.clone() })?;
+            read_record(path, &stored_under)
+        };
+        Ok(paths.iter().map(read).collect())
     }
 }
 
 /// The record in `file`, which is stored under the key `stored_under`.
-fn read_record(file: &Path, stored_under: &str) -> Result<Record<Value>, ReadError> {
+fn read_record(file: &Path, stored_under: &RecordKey) -> Result<Record<Value>, ReadError> {
     let path = || file.to_owned();
     let text = match fs::read(file) {
         Ok(bytes) => String::from_utf8(bytes).map_err(|_| ReadError::Corrupted { path: path() })?,
@@ -271,7 +311,7 @@ fn read_record(file: &Path, stored_under: &str) -> Result<Record<Value>, ReadErr
             supported: Envelope::VERSION,
         },
     })?;
-    if envelope.key.to_string() != stored_under {
+    if envelope.key != *stored_under {
         return Err(ReadError::Stale { path: path() });
     }
     Ok(Record { envelope, payload })

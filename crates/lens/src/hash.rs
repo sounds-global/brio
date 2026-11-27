@@ -19,6 +19,14 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     text
 }
 
+/// Whether `text` is exactly `digits` lowercase hexadecimal digits.
+pub(crate) fn is_hex(text: &str, digits: usize) -> bool {
+    text.len() == digits
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// A BLAKE3 over a sequence of fields.
 ///
 /// Every field is written with its length, so two different sequences never
@@ -36,7 +44,7 @@ impl FieldHasher {
 
     /// Adds a field of bytes.
     pub(crate) fn bytes(&mut self, field: &[u8]) {
-        self.count(field.len());
+        self.number(field.len() as u64);
         self.0.update(field);
     }
 

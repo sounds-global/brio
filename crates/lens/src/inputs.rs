@@ -14,8 +14,9 @@ use crate::hash::{self, FieldHasher};
 /// change to any of them gives another record and never an out-of-date one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordInputs {
-    /// The module the record is for, by its name in the workspace. Never an
-    /// absolute path: the name is written in the record.
+    /// The module the record is for, by its name in the workspace. The name
+    /// is written in the record, so it is never an absolute path: the record
+    /// writer refuses one.
     pub module: String,
     /// The inputs of the module, by name: its source and the interfaces of
     /// the modules it depends on. Each is the content itself or a hash of it.
@@ -29,6 +30,17 @@ pub struct RecordInputs {
 }
 
 impl RecordInputs {
+    /// Whether the module is named by an absolute path, on any platform:
+    /// from a root (`/…`, `\…`), a home directory (`~…`) or a drive (`C:\…`).
+    pub(crate) fn module_is_an_absolute_path(&self) -> bool {
+        let module = self.module.as_bytes();
+        let from_a_drive = module.len() >= 3
+            && module[0].is_ascii_alphabetic()
+            && module[1] == b':'
+            && matches!(module[2], b'/' | b'\\');
+        matches!(module.first(), Some(b'/' | b'\\' | b'~')) || from_a_drive
+    }
+
     /// The key of the record that the stage with this payload kind and
     /// payload version computes from these inputs.
     pub(crate) fn key(&self, payload_kind: &str, payload_version: u32) -> RecordKey {
@@ -63,11 +75,7 @@ impl RecordKey {
     /// The key a record declares for itself, as read, or `None` when `hex`
     /// is not 64 lowercase hexadecimal digits.
     pub(crate) fn from_hex(hex: String) -> Option<Self> {
-        let well_formed = hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        well_formed.then_some(Self(hex))
+        hash::is_hex(&hex, 64).then_some(Self(hex))
     }
 }
 

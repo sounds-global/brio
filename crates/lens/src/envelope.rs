@@ -9,7 +9,8 @@
 use crate::json::{Map, Value, json};
 
 use crate::hash;
-use crate::{RecordKey, canonical};
+use crate::payload::{self, InvalidPayloadKind, Payload};
+use crate::{PayloadSchema, RecordInputs, RecordKey, canonical};
 
 /// The JSON name of the envelope version.
 const ENVELOPE_VERSION: &str = "envelope_version";
@@ -50,6 +51,26 @@ impl Envelope {
     /// The version of the envelope this toolchain writes, and the only one
     /// it reads.
     pub const VERSION: u32 = 1;
+
+    /// How deep a payload can nest arrays and objects, as JSON.
+    ///
+    /// A reader of JSON stops at a fixed depth, and the record writer refuses
+    /// any payload a reader could not read back. A stage whose structure
+    /// nests deeper writes it flat, with each element naming its parent by
+    /// stable identifier.
+    pub const MAX_PAYLOAD_DEPTH: usize = 126;
+
+    /// The envelope of the record that the stage of payload `P` computes
+    /// from `inputs`.
+    pub(crate) fn of<P: Payload>(inputs: &RecordInputs) -> Result<Self, InvalidPayloadKind> {
+        let payload_kind = payload::kind_of::<P>()?;
+        Ok(Self {
+            key: inputs.key(payload_kind, P::VERSION),
+            module: inputs.module.clone(),
+            payload_kind: payload_kind.to_owned(),
+            payload_version: P::VERSION,
+        })
+    }
 
     /// The record key: the hash of every input of the record.
     #[must_use]
@@ -204,13 +225,13 @@ pub(crate) fn schema() -> Value {
 }
 
 /// The part of the schema that holds for records of one payload.
-pub(crate) fn schema_case(payload_kind: &str, payload_version: u32, fragment: &Value) -> Value {
+pub(crate) fn schema_case(payload: &PayloadSchema) -> Value {
     let mut properties = Map::new();
-    properties.insert(PAYLOAD_KIND.to_owned(), json!({ "const": payload_kind }));
+    properties.insert(PAYLOAD_KIND.to_owned(), json!({ "const": payload.kind }));
     properties.insert(
         PAYLOAD_VERSION.to_owned(),
-        json!({ "const": payload_version }),
+        json!({ "const": payload.version }),
     );
-    properties.insert(PAYLOAD.to_owned(), fragment.clone());
+    properties.insert(PAYLOAD.to_owned(), payload.fragment.clone());
     json!({ "properties": properties })
 }

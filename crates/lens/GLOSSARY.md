@@ -32,6 +32,10 @@ _Avoid_: header, wrapper
 The content-hash key a record is stored under: a hash of the stage, the module and its inputs, the toolchain version, the target and the build settings.
 _Avoid_: cache key, record hash
 
+**Digest**:
+The hash of a record's own text, written in the record, by which a reader detects a corrupted record. Unlike the **Record key**, it covers what the stage produced, not what it was computed from.
+_Avoid_: checksum, content hash
+
 **Stable identifier**:
 The name of one element of a **Stage record**, derived from its module, the stage that produced it and its place in that stage's structure. The same in every build, whatever else changes in the input.
 _Avoid_: element ID, node ID

@@ -322,14 +322,15 @@ fn a_record_with_an_unknown_payload_type_reads_as_an_untyped_payload() {
     let records = reader.read_all().expect("the records are read");
 
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].envelope.module(), "app::main");
-    assert_eq!(records[0].envelope.payload_kind(), "gauge");
-    assert_eq!(records[0].envelope.payload_version(), 1);
-    assert_eq!(records[0].payload, json!("steady"));
+    let record = records[0].as_ref().expect("the record is whole");
+    assert_eq!(record.envelope.module(), "app::main");
+    assert_eq!(record.envelope.payload_kind(), "gauge");
+    assert_eq!(record.envelope.payload_version(), 1);
+    assert_eq!(record.payload, json!("steady"));
 
-    let as_probe = records[0].clone().typed::<Probe>();
+    let as_probe = record.clone().typed::<Probe>();
     assert!(matches!(as_probe, Err(ReadError::WrongPayload { .. })));
-    let as_gauge = records[0].clone().typed::<Gauge>();
+    let as_gauge = record.clone().typed::<Gauge>();
     assert_eq!(
         as_gauge.expect("the record holds a gauge").payload,
         Gauge("steady".to_owned())
@@ -348,10 +349,8 @@ fn a_corrupted_record_is_rejected_not_trusted() {
     tamper(&path, r#""value": 7"#, r#""value": 8"#);
     let changed = reader.read::<Probe>(&inputs);
     assert!(matches!(changed, Err(ReadError::Corrupted { .. })));
-    assert!(matches!(
-        reader.read_all(),
-        Err(ReadError::Corrupted { .. })
-    ));
+    let all = reader.read_all().expect("the records are read");
+    assert!(matches!(all[..], [Err(ReadError::Corrupted { .. })]));
 
     tamper(&path, r#""value": 8"#, r#""value": 7"#);
     reader
@@ -471,6 +470,151 @@ fn a_stale_record_is_rejected_not_trusted() {
     let read = RecordReader::in_build_directory(&build_directory).read::<Probe>(&new_inputs);
 
     assert!(matches!(read, Err(ReadError::Stale { .. })));
+}
+
+#[test]
+fn a_record_that_cannot_be_read_hides_no_other_record() {
+    let build_directory = workspace("one_bad_record").join(".brio");
+    let writer = RecordWriter::in_build_directory(&build_directory);
+    let inputs = inputs("sensor a\n");
+    writer
+        .write(&inputs, &Gauge("steady".to_owned()))
+        .expect("the gauge record is written");
+    let probe_path = writer
+        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .expect("the probe record is written");
+    tamper(&probe_path, r#""value": 7"#, r#""value": 8"#);
+    fs::write(build_directory.join("lens").join("notes.json"), "{}\n")
+        .expect("a foreign file can be added");
+
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+
+    let whole: Vec<&str> = records
+        .iter()
+        .flatten()
+        .map(|record| record.envelope.payload_kind())
+        .collect();
+    assert_eq!(whole, ["gauge"]);
+    let corrupted = records
+        .iter()
+        .filter(|record| matches!(record, Err(ReadError::Corrupted { .. })))
+        .count();
+    assert_eq!(corrupted, 2);
+}
+
+/// A payload of arrays nested inside each other, and nothing else.
+struct Nest(usize);
+
+impl Payload for Nest {
+    const KIND: &'static str = "nest";
+    const VERSION: u32 = 1;
+
+    fn schema_fragment() -> Value {
+        json!({ "type": "array" })
+    }
+
+    fn to_json(&self) -> Value {
+        (0..self.0).fold(Value::Null, |inner, _| json!([inner]))
+    }
+
+    fn from_json(payload: &Value) -> Option<Self> {
+        let mut depth = 0;
+        let mut inner = payload;
+        while let Some(items) = inner.as_array() {
+            depth += 1;
+            inner = items.first()?;
+        }
+        Some(Self(depth))
+    }
+}
+
+#[test]
+fn a_payload_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
+    let workspace = workspace("nesting");
+    let build_directory = workspace.join(".brio");
+    let writer = RecordWriter::in_build_directory(&build_directory);
+    let inputs = inputs("sensor a\n");
+    assert_eq!(Envelope::MAX_PAYLOAD_DEPTH, 126);
+
+    let path = writer
+        .write(&inputs, &Nest(126))
+        .expect("the deepest payload is written");
+    let record = RecordReader::in_build_directory(&build_directory)
+        .read::<Nest>(&inputs)
+        .expect("the deepest payload is read");
+    assert_eq!(record.payload.0, 126);
+
+    let error = writer
+        .write(&inputs, &Nest(127))
+        .expect_err("no reader could read this payload back");
+    assert!(matches!(
+        error,
+        WriteError::PayloadTooDeep {
+            payload_kind: "nest",
+            depth: 127
+        }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "the `nest` payload nests 127 deep, but a record holds at most 126 levels"
+    );
+    assert_eq!(files_under(&workspace), [path]);
+}
+
+#[test]
+fn a_module_named_by_an_absolute_path_is_not_written() {
+    let workspace = workspace("absolute_path");
+    let build_directory = workspace.join(".brio");
+    let writer = RecordWriter::in_build_directory(&build_directory);
+
+    for module in [
+        "/home/ada/app/main.brio",
+        "~/app/main.brio",
+        r"C:\Users\ada\app\main.brio",
+        "C:/Users/ada/app/main.brio",
+        r"\\server\share\main.brio",
+    ] {
+        let mut inputs = inputs("sensor a\n");
+        inputs.module = module.to_owned();
+        let error = writer
+            .write(&inputs, &probe(module, &[("a", 7)]))
+            .expect_err("an absolute path is refused");
+        assert!(
+            matches!(&error, WriteError::AbsolutePath { module: refused } if refused == module),
+            "{module} gives {error}"
+        );
+    }
+    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
+
+    let mut relative = inputs("sensor a\n");
+    relative.module = "app/main.brio".to_owned();
+    writer
+        .write(&relative, &probe("app/main.brio", &[("a", 7)]))
+        .expect("a path inside the workspace is a name");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_write_that_fails_leaves_nothing_behind() {
+    let workspace = workspace("failed_write");
+    let build_directory = workspace.join(".brio");
+    let writer = RecordWriter::in_build_directory(&build_directory);
+    let inputs = inputs("sensor a\n");
+    let path = writer
+        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .expect("the record is written");
+    // A directory where the record belongs: nothing can be renamed onto it.
+    fs::remove_file(&path).expect("the record can be removed");
+    fs::create_dir(&path).expect("a directory can take its place");
+
+    let error = writer
+        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .expect_err("the record cannot be written");
+
+    assert!(matches!(error, WriteError::Io { .. }));
+    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
 }
 
 /// A payload whose kind breaks the rule on payload kinds.

@@ -111,13 +111,7 @@ impl Schema {
         let mut document = envelope::schema();
         document["version"] = Value::from(self.version.to_string());
         if !self.payloads.is_empty() {
-            document["oneOf"] = self
-                .payloads
-                .iter()
-                .map(|payload| {
-                    envelope::schema_case(payload.kind, payload.version, &payload.fragment)
-                })
-                .collect();
+            document["oneOf"] = self.payloads.iter().map(envelope::schema_case).collect();
         }
         canonical::to_text(document)
     }

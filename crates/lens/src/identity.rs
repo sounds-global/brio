@@ -54,11 +54,7 @@ impl StableId {
     #[must_use]
     pub fn from_json(value: &Value) -> Option<Self> {
         let text = value.as_str()?;
-        let well_formed = text.len() == 32
-            && text
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        well_formed.then(|| Self(text.to_owned()))
+        hash::is_hex(text, 32).then(|| Self(text.to_owned()))
     }
 }
 

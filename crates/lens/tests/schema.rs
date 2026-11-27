@@ -30,13 +30,13 @@ impl Payload for Probe {
 }
 
 /// What `P` declares, when its payload kind is valid.
-fn of<P: Payload>() -> PayloadSchema {
+fn declared<P: Payload>() -> PayloadSchema {
     PayloadSchema::of::<P>().expect("the payload kind is valid")
 }
 
 #[test]
 fn assembled_schema_includes_the_payload_fragment_and_the_combined_version() {
-    let schema = Schema::assemble([of::<Probe>()]).expect("one payload assembles");
+    let schema = Schema::assemble([declared::<Probe>()]).expect("one payload assembles");
 
     assert_eq!(schema.version().to_string(), "1+probe.3");
 
@@ -80,9 +80,10 @@ impl Payload for Gauge {
 
 #[test]
 fn the_same_payload_set_gives_byte_identical_output_in_any_order() {
-    let one_way = Schema::assemble([of::<Probe>(), of::<Gauge>()]).expect("two payloads assemble");
-    let other_way =
-        Schema::assemble([of::<Gauge>(), of::<Probe>()]).expect("two payloads assemble");
+    let one_way = Schema::assemble([declared::<Probe>(), declared::<Gauge>()])
+        .expect("two payloads assemble");
+    let other_way = Schema::assemble([declared::<Gauge>(), declared::<Probe>()])
+        .expect("two payloads assemble");
 
     assert_eq!(one_way.version().to_string(), "1+gauge.1+probe.3");
     assert_eq!(other_way.version().to_string(), "1+gauge.1+probe.3");
@@ -111,7 +112,7 @@ impl Payload for Impostor {
 
 #[test]
 fn two_payloads_of_one_payload_kind_do_not_assemble() {
-    let error = Schema::assemble([of::<Probe>(), of::<Impostor>()])
+    let error = Schema::assemble([declared::<Probe>(), declared::<Impostor>()])
         .expect_err("one payload kind cannot have two payloads");
 
     assert_eq!(
@@ -148,7 +149,7 @@ impl Payload for Label {
 
 #[test]
 fn object_keys_are_written_in_sorted_order_whatever_order_a_fragment_declares() {
-    let schema = Schema::assemble([of::<Label>()]).expect("one payload assembles");
+    let schema = Schema::assemble([declared::<Label>()]).expect("one payload assembles");
 
     let json = schema.to_json();
     let fragment = &json[json

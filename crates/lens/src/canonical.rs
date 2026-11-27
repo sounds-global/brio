@@ -15,6 +15,16 @@ pub(crate) fn to_text(value: Value) -> String {
     format!("{:#}\n", with_sorted_keys(value))
 }
 
+/// How deep `value` nests: 0 for a number, a text, a boolean or null, and one
+/// more than its deepest item for an array or an object.
+pub(crate) fn depth(value: &Value) -> usize {
+    match value {
+        Value::Object(object) => 1 + object.values().map(depth).max().unwrap_or(0),
+        Value::Array(items) => 1 + items.iter().map(depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// `value` with the keys of every object in sorted order.
 ///
 /// `serde_json` only sorts keys itself while its `preserve_order` feature is
