@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use crate::json::{Map, Value, json};
-use crate::mask::{self, MaskedMarkers};
+use crate::mask::{self, MaskedMarker, MaskedMarkers};
 use crate::provenance::{self, OriginStep, Provenance};
 use crate::schema::{list_schema, object_schema, reference};
 use crate::{ElementLink, Reason, SourceSpan, StableId, fields, reason};
@@ -36,6 +36,9 @@ pub struct Element {
     pub(crate) children: Vec<StableId>,
     pub(crate) payload: Value,
     pub(crate) masked: MaskedMarkers,
+    /// The first masked marker the phase asked for where the payload did
+    /// not hold what it said. An element read from a record has none.
+    mismarked: Option<MaskedMarker>,
     pub(crate) provenance: Provenance,
     pub(crate) reasons: Vec<Reason>,
 }
@@ -57,6 +60,7 @@ impl Element {
             children: Vec::new(),
             payload,
             masked: MaskedMarkers::default(),
+            mismarked: None,
             provenance: Provenance::default(),
             reasons: Vec::new(),
         }
@@ -80,7 +84,8 @@ impl Element {
     /// provenance or in the decision of a reason.
     #[must_use]
     pub fn masked_at(mut self, place: &[&str]) -> Self {
-        self.masked.mask(&mut self.payload, place);
+        let mismarked = self.masked.mask(&mut self.payload, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
         self
     }
 
@@ -94,7 +99,8 @@ impl Element {
     /// [`Element::masked_at`].
     #[must_use]
     pub fn still_masked_at(mut self, place: &[&str]) -> Self {
-        self.masked.keep(&self.payload, place);
+        let mismarked = self.masked.keep(&self.payload, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
         self
     }
 
@@ -179,9 +185,16 @@ impl Element {
     }
 
     /// The masked markers of the payload: every place where a value was
-    /// masked, as a JSON Pointer (RFC 6901), in the order of their text.
-    pub fn masked(&self) -> impl Iterator<Item = &str> {
-        self.masked.markers()
+    /// masked, in the order of their text.
+    pub fn masked(&self) -> impl Iterator<Item = &MaskedMarker> {
+        self.masked.iter()
+    }
+
+    /// A masked marker of this element that names a place where no value
+    /// of its payload was masked.
+    pub(crate) fn misplaced_marker(&self) -> Option<&MaskedMarker> {
+        self.masked
+            .misplaced_in(&self.payload, self.mismarked.as_ref())
     }
 
     /// Where this element comes from.
@@ -225,6 +238,7 @@ impl Element {
             children: fields::list_from(element.get(CHILDREN)?, StableId::from_json)?,
             payload: element.get(PAYLOAD)?.clone(),
             masked: MaskedMarkers::from_json(element.get(MASKED)?)?,
+            mismarked: None,
             provenance: Provenance::from_json(element.get(PROVENANCE)?)?,
             reasons: fields::list_from(element.get(REASONS)?, Reason::from_json)?,
         })

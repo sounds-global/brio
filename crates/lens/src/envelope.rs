@@ -16,8 +16,9 @@ use crate::payload::{self, InvalidPayloadKind, Payload, PayloadType};
 use crate::schema::{list_schema, object_schema, reference};
 use crate::stage::{self, StageIdentity};
 use crate::{
-    Element, ElementTable, MaskedPart, PayloadSchema, Reason, RecordInputs, RecordKey, SourceSpan,
-    StableId, Stage, canonical, element, fields, hash, mask, provenance, reason,
+    Element, ElementTable, MaskedMarker, MaskedPart, PayloadSchema, Reason, RecordInputs,
+    RecordKey, SourceSpan, StableId, Stage, canonical, element, fields, hash, mask, provenance,
+    reason,
 };
 
 /// The JSON name of the envelope version.
@@ -266,16 +267,16 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
             });
         }
     }
-    let in_the_payload = element.masked.misplaced_in(&element.payload);
+    let in_the_payload = element.misplaced_marker();
     let in_a_reason = element.reasons.iter().find_map(Reason::misplaced_marker);
     let misplaced = in_the_payload
-        .map(|place| (MaskedPart::Payload, place))
-        .or(in_a_reason.map(|place| (MaskedPart::Reason, place)));
-    if let Some((part, place)) = misplaced {
+        .map(|marker| (MaskedPart::Payload, marker))
+        .or(in_a_reason.map(|marker| (MaskedPart::Reason, marker)));
+    if let Some((part, marker)) = misplaced {
         return Err(RecordRefusal::MisplacedMaskedMarker {
             element: element.id.clone(),
             part,
-            place: place.to_owned(),
+            marker: marker.clone(),
         });
     }
     Ok(())
@@ -353,8 +354,8 @@ pub enum RecordRefusal {
         element: StableId,
         /// The part of the element the marker is about.
         part: MaskedPart,
-        /// The place the marker names, as a JSON Pointer (RFC 6901).
-        place: String,
+        /// The marker.
+        marker: MaskedMarker,
     },
     /// Two elements of the record have one stable identifier.
     DuplicateElement {
@@ -403,10 +404,10 @@ impl fmt::Display for RecordRefusal {
             Self::MisplacedMaskedMarker {
                 element,
                 part,
-                place,
+                marker,
             } => write!(
                 f,
-                "the element `{element}` has a masked marker at `{place}` in {part}, where no \
+                "the element `{element}` has a masked marker at `{marker}` in {part}, where no \
                  value was masked"
             ),
             Self::DuplicateElement { element } => {

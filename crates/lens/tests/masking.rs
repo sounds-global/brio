@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use brio_lens::json::{self, Value, json};
-use brio_lens::{Element, MaskedPart, Reason, RecordRefusal, Stage};
+use brio_lens::{Element, MaskedPart, Reason, RecordRefusal, StableId, Stage};
 
 use support::{
     Forge, Loose, assert_forgeries_are_corrupted, build_directory, envelopes, files_under, inputs,
@@ -124,14 +124,23 @@ fn a_payload_is_free_to_hold_what_looks_like_a_masked_marker() {
     assert_eq!(element.masked().count(), 0);
 }
 
+/// The element, the part of it and the masked marker that `refusal` is
+/// about.
+fn misplaced_marker(refusal: &RecordRefusal) -> (StableId, MaskedPart, String) {
+    match refusal {
+        RecordRefusal::MisplacedMaskedMarker {
+            element,
+            part,
+            marker,
+        } => (element.clone(), *part, marker.as_str().to_owned()),
+        other => panic!("the record is refused for another reason: {other}"),
+    }
+}
+
 #[test]
 fn a_masked_marker_where_no_value_was_masked_is_not_written() {
     let token = stage::<Loose>("app::main").id(&["binding", "token"]);
-    let misplaced = |part: MaskedPart, place: &str| RecordRefusal::MisplacedMaskedMarker {
-        element: token.clone(),
-        part,
-        place: place.to_owned(),
-    };
+    let misplaced = |part: MaskedPart, marker: &str| (token.clone(), part, marker.to_owned());
 
     let nowhere = refusal("masked_nowhere", |stage| {
         vec![
@@ -142,7 +151,10 @@ fn a_masked_marker_where_no_value_was_masked_is_not_written() {
             .masked_at(&["missing"]),
         ]
     });
-    assert_eq!(nowhere, misplaced(MaskedPart::Payload, "/missing"));
+    assert_eq!(
+        misplaced_marker(&nowhere),
+        misplaced(MaskedPart::Payload, "/missing")
+    );
     assert_eq!(
         nowhere.to_string(),
         format!(
@@ -162,19 +174,28 @@ fn a_masked_marker_where_no_value_was_masked_is_not_written() {
             .masked_at(&["unit"]),
         ]
     });
-    assert_eq!(on_nothing, misplaced(MaskedPart::Payload, "/unit"));
+    assert_eq!(
+        misplaced_marker(&on_nothing),
+        misplaced(MaskedPart::Payload, "/unit")
+    );
 
     let beyond_a_list = refusal("masked_beyond_a_list", |stage| {
         vec![Element::new(stage.id(&["binding", "token"]), json!(["hunter2"])).masked_at(&["01"])]
     });
-    assert_eq!(beyond_a_list, misplaced(MaskedPart::Payload, "/01"));
+    assert_eq!(
+        misplaced_marker(&beyond_a_list),
+        misplaced(MaskedPart::Payload, "/01")
+    );
 
     let put_back = refusal("masked_in_a_reason", |stage| {
         let reason = Reason::new("folded constant", json!({ "folded_to": "hunter2" }))
             .masked_at(&["folded", "to"]);
         vec![Element::new(stage.id(&["binding", "token"]), json!("token")).because(reason)]
     });
-    assert_eq!(put_back, misplaced(MaskedPart::Reason, "/folded/to"));
+    assert_eq!(
+        misplaced_marker(&put_back),
+        misplaced(MaskedPart::Reason, "/folded/to")
+    );
     assert_eq!(
         put_back.to_string(),
         format!(
@@ -293,12 +314,8 @@ fn a_value_is_not_written_where_one_is_said_to_be_masked_already() {
         ]
     });
     assert_eq!(
-        in_a_payload,
-        RecordRefusal::MisplacedMaskedMarker {
-            element: token.clone(),
-            part: MaskedPart::Payload,
-            place: "/value".to_owned(),
-        }
+        misplaced_marker(&in_a_payload),
+        (token.clone(), MaskedPart::Payload, "/value".to_owned())
     );
 
     let in_a_reason = refusal("masked_already_reason", |stage| {
@@ -307,12 +324,8 @@ fn a_value_is_not_written_where_one_is_said_to_be_masked_already() {
         vec![Element::new(stage.id(&["binding", "token"]), json!("token")).because(reason)]
     });
     assert_eq!(
-        in_a_reason,
-        RecordRefusal::MisplacedMaskedMarker {
-            element: token,
-            part: MaskedPart::Reason,
-            place: "/folded_to".to_owned(),
-        }
+        misplaced_marker(&in_a_reason),
+        (token, MaskedPart::Reason, "/folded_to".to_owned())
     );
 }
 

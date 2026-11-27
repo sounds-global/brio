@@ -3,7 +3,7 @@
 //! Reasons: why a phase decided what it decided.
 
 use crate::json::{Value, json};
-use crate::mask::{self, MaskedMarkers};
+use crate::mask::{self, MaskedMarker, MaskedMarkers};
 use crate::schema::{list_schema, object_schema, text_schema};
 use crate::{ElementLink, envelope, fields, provenance};
 
@@ -32,6 +32,9 @@ pub struct Reason {
     pub involves: Vec<ElementLink>,
     /// Where a value of the justification was masked.
     masked: MaskedMarkers,
+    /// The first masked marker the phase asked for where the justification
+    /// did not hold what it said. A reason read from a record has none.
+    mismarked: Option<MaskedMarker>,
 }
 
 impl Reason {
@@ -50,6 +53,7 @@ impl Reason {
             because,
             involves: Vec::new(),
             masked: MaskedMarkers::default(),
+            mismarked: None,
         }
     }
 
@@ -60,7 +64,8 @@ impl Reason {
     /// dropped here, so its content is in no record.
     #[must_use]
     pub fn masked_at(mut self, place: &[&str]) -> Self {
-        self.masked.mask(&mut self.because, place);
+        let mismarked = self.masked.mask(&mut self.because, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
         self
     }
 
@@ -69,7 +74,8 @@ impl Reason {
     /// [`Element::still_masked_at`](crate::Element::still_masked_at).
     #[must_use]
     pub fn still_masked_at(mut self, place: &[&str]) -> Self {
-        self.masked.keep(&self.because, place);
+        let mismarked = self.masked.keep(&self.because, place).err();
+        self.mismarked = self.mismarked.or(mismarked);
         self
     }
 
@@ -87,15 +93,16 @@ impl Reason {
     }
 
     /// The masked markers of the justification: every place where a value
-    /// was masked, as a JSON Pointer (RFC 6901), in the order of their text.
-    pub fn masked(&self) -> impl Iterator<Item = &str> {
-        self.masked.markers()
+    /// was masked, in the order of their text.
+    pub fn masked(&self) -> impl Iterator<Item = &MaskedMarker> {
+        self.masked.iter()
     }
 
     /// A masked marker of this reason that names a place where no value of
     /// its justification was masked.
-    pub(crate) fn misplaced_marker(&self) -> Option<&str> {
-        self.masked.misplaced_in(&self.because)
+    pub(crate) fn misplaced_marker(&self) -> Option<&MaskedMarker> {
+        self.masked
+            .misplaced_in(&self.because, self.mismarked.as_ref())
     }
 
     /// This reason, with a justification that is also about the element
@@ -122,6 +129,7 @@ impl Reason {
             decision: reason.get(DECISION)?.as_str()?.to_owned(),
             because: reason.get(BECAUSE)?.clone(),
             masked: MaskedMarkers::from_json(reason.get(MASKED)?)?,
+            mismarked: None,
             involves: fields::list_from(reason.get(INVOLVES)?, ElementLink::from_json)?,
         })
     }
