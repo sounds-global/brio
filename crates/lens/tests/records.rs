@@ -6,7 +6,7 @@
 mod support;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use brio_lens::json::{Value, json};
 use brio_lens::{
@@ -978,6 +978,24 @@ fn a_file_that_is_not_named_as_a_record_is_given_as_an_error_and_hides_no_other_
     assert_eq!(not_records.iter().flatten().count(), 2);
 }
 
+/// The file where the writer `writer` of the process `process` keeps the
+/// record of the file `record` until it is complete.
+fn unfinished_file(record: &Path, process: &str, writer: &str) -> PathBuf {
+    record.with_extension(format!("{process}-{writer}.unfinished"))
+}
+
+/// Runs `reader` beside four of `writer`, each given its number, until all
+/// are done.
+fn beside_four_writers(writer: impl Fn(usize) + Sync, reader: impl FnOnce() + Send) {
+    let writer = &writer;
+    std::thread::scope(|scope| {
+        for number in 0..4 {
+            scope.spawn(move || writer(number));
+        }
+        scope.spawn(reader);
+    });
+}
+
 #[test]
 fn a_record_that_a_writer_has_not_finished_is_no_record_yet() {
     let build_directory = workspace("unfinished").join(".brio");
@@ -988,7 +1006,7 @@ fn a_record_that_a_writer_has_not_finished_is_no_record_yet() {
         &probe(&[("a", 7)]),
     );
     // What a writer of the same record leaves until its record is complete.
-    fs::write(path.with_extension("4242-0.unfinished"), "{\n  \"dig")
+    fs::write(unfinished_file(&path, "4242", "0"), "{\n  \"dig")
         .expect("an unfinished file can be added");
 
     let records = RecordReader::in_build_directory(&build_directory)
@@ -1016,9 +1034,8 @@ fn a_file_named_as_unfinished_that_no_writer_made_is_given_as_an_error() {
         fs::write(path.with_file_name(name), text).expect("a foreign file can be added");
     }
     // No process has so high a number, and no writer keeps a directory.
-    fs::write(path.with_extension("99999999999-0.unfinished"), "")
-        .expect("a foreign file can be added");
-    fs::create_dir(path.with_extension("4242-1.unfinished")).expect("a directory can be added");
+    fs::write(unfinished_file(&path, "99999999999", "0"), "").expect("a foreign file can be added");
+    fs::create_dir(unfinished_file(&path, "4242", "1")).expect("a directory can be added");
 
     let records = RecordReader::in_build_directory(&build_directory)
         .read_all()
@@ -1037,7 +1054,7 @@ fn a_reader_beside_writers_of_a_record_is_always_given_that_record() {
     let inputs = inputs("sensor a\n");
     write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
 
-    let write_often = || {
+    let write_often = |_writer| {
         for _ in 0..200 {
             write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
         }
@@ -1051,12 +1068,7 @@ fn a_reader_beside_writers_of_a_record_is_always_given_that_record() {
             assert!(records[0].is_ok(), "{records:?}");
         }
     };
-    std::thread::scope(|scope| {
-        for _ in 0..4 {
-            scope.spawn(write_often);
-        }
-        scope.spawn(read_often);
-    });
+    beside_four_writers(write_often, read_often);
 }
 
 #[test]
@@ -1092,12 +1104,7 @@ fn a_reader_beside_writers_of_new_records_is_given_no_error_and_loses_no_record(
             read_before = records.len();
         }
     };
-    std::thread::scope(|scope| {
-        for writer in 0..4 {
-            scope.spawn(move || write_new_records(writer));
-        }
-        scope.spawn(read_often);
-    });
+    beside_four_writers(write_new_records, read_often);
 }
 
 #[test]
@@ -1131,7 +1138,8 @@ fn a_record_is_never_written_through_a_name_a_stopped_writer_left() {
     // its unfinished name, still a name of the record. The next writers of
     // this process make the same names.
     for writer in 0..2000 {
-        let left = path.with_extension(format!("{}-{writer}.unfinished", std::process::id()));
+        let process = std::process::id().to_string();
+        let left = unfinished_file(&path, &process, &writer.to_string());
         fs::hard_link(&path, left).expect("the record can be given a second name");
     }
 

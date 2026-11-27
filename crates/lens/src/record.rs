@@ -85,25 +85,44 @@ fn record_key_of(file: &Path) -> Option<RecordKey> {
     RecordKey::from_hex(key.to_owned())
 }
 
-/// The name of the file where the writer `writer` of the process `process`
-/// keeps the record with `key` until it is complete. The name is that
-/// writer's alone.
-fn unfinished_name(key: &RecordKey, process: u32, writer: u64) -> String {
-    format!("{key}.{process}-{writer}{UNFINISHED_SUFFIX}")
+/// The name of the file of an unfinished record: where one writer of one
+/// process keeps the record with one record key until it is complete. The
+/// name is that writer's alone.
+///
+/// The writer makes the name and the reader knows it again, both here, so
+/// they cannot come to name it differently.
+struct UnfinishedName {
+    key: RecordKey,
+    process: u32,
+    writer: u64,
 }
 
-/// Whether `name` is a name that [`unfinished_name`] gives: the name of a
-/// record that a writer, of any process, has not finished.
-fn is_unfinished_name(name: &str) -> bool {
-    let parts = || {
-        let (key, numbers) = name.strip_suffix(UNFINISHED_SUFFIX)?.rsplit_once('.')?;
-        let (process, writer) = numbers.split_once('-')?;
-        let key = RecordKey::from_hex(key.to_owned())?;
-        Some((key, process.parse().ok()?, writer.parse().ok()?))
-    };
-    // The name is recognised by making it again, so the writer and the
-    // reader cannot come to name it differently.
-    parts().is_some_and(|(key, process, writer)| unfinished_name(&key, process, writer) == name)
+impl UnfinishedName {
+    /// The unfinished name that `name` is, or `None` when it is the name of
+    /// something else: no writer, of any process, gives it.
+    fn parse(name: &str) -> Option<Self> {
+        let (key, writer) = name.strip_suffix(UNFINISHED_SUFFIX)?.rsplit_once('.')?;
+        let (process, writer) = writer.split_once('-')?;
+        let parsed = Self {
+            key: RecordKey::from_hex(key.to_owned())?,
+            process: process.parse().ok()?,
+            writer: writer.parse().ok()?,
+        };
+        // A number can be written in more than one way, and a writer writes
+        // it in one.
+        (parsed.to_string() == name).then_some(parsed)
+    }
+}
+
+impl fmt::Display for UnfinishedName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            key,
+            process,
+            writer,
+        } = self;
+        write!(f, "{key}.{process}-{writer}{UNFINISHED_SUFFIX}")
+    }
 }
 
 /// Whether `file` holds the record with the text `text`, whole.
@@ -222,11 +241,12 @@ impl RecordWriter {
         // name only once it is complete. Its name until then is its
         // writer's alone, so two writers of one record never share it.
         static WRITES: AtomicU64 = AtomicU64::new(0);
-        let unfinished = directory.join(unfinished_name(
-            envelope.key(),
-            std::process::id(),
-            WRITES.fetch_add(1, Ordering::Relaxed),
-        ));
+        let unfinished = UnfinishedName {
+            key: envelope.key().clone(),
+            process: std::process::id(),
+            writer: WRITES.fetch_add(1, Ordering::Relaxed),
+        };
+        let unfinished = directory.join(unfinished.to_string());
         let written = fs::create_dir_all(directory)
             .and_then(|()| write_unfinished(&unfinished, &text))
             .and_then(|()| put_in_place(&unfinished, &path, &text));
@@ -372,7 +392,8 @@ impl RecordReader {
             // A writer keeps an unfinished record in a file: a directory or
             // a link with such a name is not one. A file that is gone
             // before its type is known was one, finished since.
-            let unfinished = entry.file_name().to_str().is_some_and(is_unfinished_name)
+            let named_unfinished = |name: &str| UnfinishedName::parse(name).is_some();
+            let unfinished = entry.file_name().to_str().is_some_and(named_unfinished)
                 && entry.file_type().map_or(true, |kind| kind.is_file());
             if !unfinished {
                 paths.push(entry.path());
