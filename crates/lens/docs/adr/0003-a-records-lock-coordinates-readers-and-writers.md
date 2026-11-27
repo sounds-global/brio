@@ -2,7 +2,7 @@
 
 Several processes share one build directory as a matter of course: a `brio` command, the language server (PKG-30), a second build. Lens kept them out of each other's way without any coordination, and three faults remained that no care inside one process removes: a record that is replaced can be missing for a reader that lists the records at that moment, the same on a file system that gives a file no second name, and nothing can tell the unfinished record of a writer that was stopped from that of a writer still at work.
 
-Lens therefore coordinates them with one lock, the Records lock: a file in the build directory that every reader and writer locks, through the file locks of the Rust standard library.
+Lens therefore coordinates them with one lock, the Records lock: a file in the build directory that a reader locks to list the records and a writer locks to write one, through the file locks of the Rust standard library.
 
 ## The promise
 
@@ -10,7 +10,7 @@ The lock file and what its locks mean are part of the layout of a build director
 
 - The lock file is `lens.lock`, in the build directory, beside the `lens` directory of the records and never in it.
 - A writer makes it, when it is not there, before it changes anything among the records, and writes nothing when it cannot make it. Lens never deletes it. A reader never makes it.
-- It is a file, and is never opened through a link. Something else with its name is no lock file: a writer then writes nothing, and a reader reads without a lock.
+- It is a file, and is never opened through a link. Something else with its name is no lock file: a writer then writes nothing, and a reader reads without a lock. Something put in its place between a look at it and its opening is not guarded against: that takes a program at work against the build directory.
 - The holder of a **shared** lock lists the records, or makes a new record without replacing anything.
 - The holder of the **exclusive** lock is alone at work among the records: it may replace or remove files there.
 - The lock is advisory, and is released when its holder ends, however it ends.
@@ -21,7 +21,7 @@ The lock file and what its locks mean are part of the layout of a build director
 - A reader that lists every record holds the shared lock while it lists the names, when the lock file is there, and releases it before it reads the files.
 - No lock is taken to read one record by its inputs, or to write a record that is there with the same bytes: one file is read by its name, and a file is under a name whole or not at all.
 - Where the lock file is there and the lock cannot be taken, readers and writers go on without it, silently, with the care they take of each other without a lock. Records are a cache (PKG-26): a build that cannot run on an unusual file system is worse than one without this guarantee there.
-- A lock file that can only be read locks as any other: to be read is enough to be locked.
+- A reader opens the lock file to read it, which is enough for the shared lock. A writer opens it to read and write when it may, because some file systems on a network give the exclusive lock only on a file open to be written to, and to read alone otherwise: a lock file that can only be read still locks shared.
 - No lock type is in the public interface of `brio_lens`. The Engine context may later coordinate the whole build directory and take this lock's place without breaking any phase.
 
 Replacing a record only under the exclusive lock, removing unfinished records under it, and what a reader makes of a directory with no lock file are decided here and built in their own changes (#16).
@@ -44,4 +44,4 @@ Replacing a record only under the exclusive lock, removing unfinished records un
 - A writer that waits for the exclusive lock has no promised turn behind an unbroken stream of readers. Removing this needs a second lock file, which was judged heavier than the risk.
 - Writing records directly into a reference record set leaves the lock file in the source tree. A set made by copying the records has none.
 - A build directory in which no file can be made takes no record, even when its records directory can be written to.
-- In a build directory that has a lock file, a record renamed by hand to the name of an unfinished record is passed over. The next build makes the record again.
+- A record renamed by hand to the name of an unfinished record is passed over. In a build directory the next build makes the record again.

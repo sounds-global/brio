@@ -81,7 +81,7 @@ A record its writer is still writing, in a file with a name of that writer's alo
 _Avoid_: temporary file, partial record
 
 **Records lock**:
-The lock that the readers and writers of the records of one build directory take, in any number of processes: a file beside the records, locked shared to list the records or to make a new one, and exclusive to be alone at work among them.
+The lock by which the readers and writers of the records of one build directory, in any number of processes, keep out of each other's way: a file beside the records, locked shared to list the records or to make a new one, and exclusive to be alone at work among them.
 _Avoid_: build lock, mutex, lock file (for the lock itself)
 
 **Stage test**:

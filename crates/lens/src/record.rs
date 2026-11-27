@@ -260,9 +260,9 @@ impl RecordWriter {
     ///
     /// The records are in the directory `lens` of the build directory, each
     /// in a file named for its record key. Beside that directory the writer
-    /// makes the file `lens.lock`, the Records lock, before its first
-    /// record, and holds it shared while it writes each record that is not
-    /// there already. Another tool that reads or writes the records of a
+    /// makes the file `lens.lock`, the Records lock, before it changes
+    /// anything among the records, and holds it shared while it writes each
+    /// record that is not there already. Another tool that reads or writes the records of a
     /// build directory locks that file too: shared to list the records or
     /// to make a new one, exclusive to be alone at work among them.
     ///
@@ -485,7 +485,7 @@ impl RecordReader {
         }
         // The lock is held while the names are listed, and no longer: a
         // record is read whole under its name with or without it.
-        let list = || listed(&self.directory);
+        let list = || paths_to_read(&self.directory);
         let mut paths = lock::while_listing_the_records(&self.directory, list)?;
         paths.sort();
 
@@ -500,7 +500,7 @@ impl RecordReader {
 
 /// What is among the records in `records_directory`, but the unfinished
 /// records, which are no records yet.
-fn listed(records_directory: &Path) -> Result<Vec<PathBuf>, ReadError> {
+fn paths_to_read(records_directory: &Path) -> Result<Vec<PathBuf>, ReadError> {
     let io_error = |error| ReadError::Io {
         path: records_directory.to_owned(),
         error,

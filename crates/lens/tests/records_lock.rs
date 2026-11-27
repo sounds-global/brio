@@ -59,6 +59,18 @@ fn write_probe(build_directory: &Path, module: &str) -> PathBuf {
     )
 }
 
+/// What a writer says when it is asked for the record of the probe stage
+/// of `app::main` in `build_directory` and cannot write it.
+fn failed_write(build_directory: &Path) -> WriteError {
+    RecordWriter::in_build_directory(build_directory)
+        .write(
+            &stage::<Probe>("app::main"),
+            || inputs("sensor a\n"),
+            &probe(&[("a", 7)]),
+        )
+        .expect_err("the record cannot be written")
+}
+
 #[test]
 fn a_writer_makes_the_lock_file_beside_the_records_and_a_reader_does_not_report_it() {
     let build_directory = workspace("lock_file").join(".brio");
@@ -80,14 +92,9 @@ fn a_writer_makes_the_lock_file_before_it_changes_anything_among_the_records() {
     // A file where the records belong: no record can be written.
     fs::write(build_directory.join("lens"), "").expect("a file can take the place of the records");
 
-    RecordWriter::in_build_directory(&build_directory)
-        .write(
-            &stage::<Probe>("app::main"),
-            || inputs("sensor a\n"),
-            &probe(&[("a", 7)]),
-        )
-        .expect_err("the record cannot be written");
+    let error = failed_write(&build_directory);
 
+    assert!(matches!(error, WriteError::Io { .. }), "{error}");
     assert!(lock_file(&build_directory).is_file());
 }
 
@@ -222,18 +229,6 @@ fn reading_one_record_and_writing_a_record_that_is_there_take_no_lock() {
     assert_eq!(written.recv_timeout(LONG), Ok(record));
 }
 
-/// What a writer says when it is asked for the record of the probe stage
-/// of `app::main` in `build_directory` and cannot write it.
-fn failed_write(build_directory: &Path) -> WriteError {
-    RecordWriter::in_build_directory(build_directory)
-        .write(
-            &stage::<Probe>("app::main"),
-            || inputs("sensor a\n"),
-            &probe(&[("a", 7)]),
-        )
-        .expect_err("the record cannot be written")
-}
-
 #[test]
 fn a_writer_that_cannot_make_the_lock_file_writes_no_record() {
     let build_directory = workspace("no_lock_file_to_make").join(".brio");
@@ -309,4 +304,22 @@ fn a_writer_takes_the_lock_on_a_lock_file_it_can_only_read() {
     );
     lock.unlock().expect("the lock can be released");
     assert!(written.recv_timeout(LONG).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_writer_and_a_reader_go_on_without_a_lock_file_they_cannot_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let build_directory = workspace("lock_file_closed").join(".brio");
+    write_probe(&build_directory, "app::main");
+    fs::set_permissions(
+        lock_file(&build_directory),
+        fs::Permissions::from_mode(0o000),
+    )
+    .expect("the permissions can be changed");
+
+    write_probe(&build_directory, "app::motor");
+
+    assert_eq!(count_records(&build_directory), 2);
 }
