@@ -509,3 +509,24 @@ fn lens_test_is_an_error_when_a_record_cannot_be_read() {
         format!("brio: the record `{}` is corrupted\n", record.display())
     );
 }
+
+#[test]
+fn lens_test_is_an_error_when_a_record_set_holds_no_record() {
+    let sets = record_sets("lens_test_no_record");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
+    write_record(&reference, "app::main", "0.1.0", &[("a", 2)]);
+
+    // The records directories inside the two build directories.
+    let output = lens_test(&produced.join("lens"), &reference.join("lens"));
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "brio: `{}` holds no record\n",
+            produced.join("lens").display()
+        )
+    );
+}

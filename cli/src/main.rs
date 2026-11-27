@@ -67,15 +67,19 @@ fn main() -> ExitCode {
     // The one place that says what exit status each end of a command has.
     match outcome {
         Ok(Outcome::Succeeded) => ExitCode::SUCCESS,
-        Ok(Outcome::Failed { report }) => {
-            print!("{report}");
-            ExitCode::FAILURE
-        }
-        Err(error) => {
-            eprintln!("brio: {error}");
-            ExitCode::FAILURE
-        }
+        Ok(Outcome::Failed { report }) => match io::stdout().write_all(report.as_bytes()) {
+            Ok(()) => ExitCode::FAILURE,
+            Err(error) => failed_with(&error),
+        },
+        Err(error) => failed_with(&*error),
     }
+}
+
+/// Prints `error`, which kept a command from running to its end, and gives
+/// the exit status of a command that failed.
+fn failed_with(error: &dyn Error) -> ExitCode {
+    eprintln!("brio: {error}");
+    ExitCode::FAILURE
 }
 
 /// The payloads of every phase linked into this binary.
@@ -109,14 +113,17 @@ fn lens_test(produced: &Path, reference: &Path) -> Result<Outcome, Box<dyn Error
 /// The envelope of every record in `directory`, which is laid out as a
 /// build directory.
 fn record_set(directory: &Path) -> Result<Vec<Envelope>, Box<dyn Error>> {
-    // A directory that is not there has no record, and so would compare as
-    // an empty record set: a mistyped name must not pass a test.
     if !directory.is_dir() {
         return Err(format!("`{}` is not a directory", directory.display()).into());
     }
     let mut envelopes = Vec::new();
     for record in RecordReader::in_build_directory(directory).read_all()? {
         envelopes.push(record?.envelope);
+    }
+    // No test compares nothing: a set with no record is the wrong
+    // directory, such as the records directory inside a build directory.
+    if envelopes.is_empty() {
+        return Err(format!("`{}` holds no record", directory.display()).into());
     }
     Ok(envelopes)
 }
@@ -128,13 +135,13 @@ fn difference_report(difference: &StageDifference) -> String {
         difference.produced_payload_version(),
         difference.reference_payload_version(),
     );
-    let how = match versions {
+    let verdict = match versions {
         (Some(_), None) => "has no reference record",
         (None, Some(_)) => "was not produced",
         _ => "differs from its reference record",
     };
     let mut report = format!(
-        "the `{}` record of module `{}` {how}:\n",
+        "the `{}` record of module `{}` {verdict}:\n",
         difference.payload_kind(),
         difference.module()
     );
@@ -150,12 +157,12 @@ fn difference_report(difference: &StageDifference) -> String {
     if difference.roots_reordered() {
         report.push_str("  roots: in another order\n");
     }
-    let elements = [
+    let differing = [
         ("added", difference.added()),
         ("removed", difference.removed()),
         ("changed", difference.changed()),
     ];
-    for (how, elements) in elements {
+    for (how, elements) in differing {
         for element in elements {
             let _ = writeln!(report, "  {how}: {element}");
         }

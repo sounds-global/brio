@@ -109,17 +109,18 @@ impl StageDifference {
         reference: Option<&Envelope>,
     ) -> Option<Self> {
         let none = ElementTable::default();
-        let new = produced.map_or(&none, Envelope::elements);
-        let old = reference.map_or(&none, Envelope::elements);
+        let produced_elements = produced.map_or(&none, Envelope::elements);
+        let reference_elements = reference.map_or(&none, Envelope::elements);
         let only_in = |these: &ElementTable, those: &ElementTable| -> Vec<StableId> {
             let missing = these
                 .iter()
                 .filter(|element| those.get(element.id()).is_none());
             missing.map(|element| element.id().clone()).collect()
         };
-        let changed = new.iter().filter(|element| {
-            old.get(element.id())
-                .is_some_and(|reference| reference != *element)
+        let changed = produced_elements.iter().filter(|element| {
+            reference_elements
+                .get(element.id())
+                .is_some_and(|counterpart| counterpart != *element)
         });
         // The roots are in no element, so their order is compared apart:
         // the roots that both records have, in the order of each.
@@ -133,10 +134,11 @@ impl StageDifference {
             payload_kind: stage.1.to_owned(),
             produced_payload_version: produced.map(Envelope::payload_version),
             reference_payload_version: reference.map(Envelope::payload_version),
-            added: only_in(new, old),
-            removed: only_in(old, new),
+            added: only_in(produced_elements, reference_elements),
+            removed: only_in(reference_elements, produced_elements),
             changed: changed.map(|element| element.id().clone()).collect(),
-            roots_reordered: shared_roots(new, old) != shared_roots(old, new),
+            roots_reordered: shared_roots(produced_elements, reference_elements)
+                != shared_roots(reference_elements, produced_elements),
         };
         let same = difference.produced_payload_version == difference.reference_payload_version
             && difference.added.is_empty()
