@@ -1031,8 +1031,8 @@ fn a_file_named_as_unfinished_that_no_writer_made_is_given_as_an_error() {
 }
 
 #[test]
-fn a_reader_beside_writers_is_given_no_error() {
-    let build_directory = workspace("reader_beside_writers").join(".brio");
+fn a_reader_beside_writers_of_a_record_is_always_given_that_record() {
+    let build_directory = workspace("reader_beside_rewriters").join(".brio");
     let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\n");
     write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
@@ -1046,13 +1046,9 @@ fn a_reader_beside_writers_is_given_no_error() {
         let reader = RecordReader::in_build_directory(&build_directory);
         for _ in 0..200 {
             let records = reader.read_all().expect("the records are read");
-            // What a writer has not finished is never taken for a record,
-            // or for a file that is not one.
-            let errors: Vec<&ReadError> = records
-                .iter()
-                .filter_map(|record| record.as_ref().err())
-                .collect();
-            assert!(errors.is_empty(), "{errors:?}");
+            // A record that is written again is never gone for a moment.
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert!(records[0].is_ok(), "{records:?}");
         }
     };
     std::thread::scope(|scope| {
@@ -1061,4 +1057,61 @@ fn a_reader_beside_writers_is_given_no_error() {
         }
         scope.spawn(read_often);
     });
+}
+
+#[test]
+fn a_reader_beside_writers_of_new_records_is_given_no_error_and_loses_no_record() {
+    let build_directory = workspace("reader_beside_writers").join(".brio");
+    let stage = stage::<Probe>("app::main");
+    write_record(
+        &build_directory,
+        &stage,
+        &inputs("sensor a\n"),
+        &probe(&[("a", 7)]),
+    );
+
+    let write_new_records = |writer: usize| {
+        for record in 0..25 {
+            let inputs = inputs(&format!("sensor a\n# {writer} {record}\n"));
+            write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+        }
+    };
+    let read_often = || {
+        let reader = RecordReader::in_build_directory(&build_directory);
+        let mut read_before = 1;
+        for _ in 0..50 {
+            let records = reader.read_all().expect("the records are read");
+            // What a writer has not finished is never taken for a record,
+            // or for a file that is not one.
+            let errors: Vec<&ReadError> = records
+                .iter()
+                .filter_map(|record| record.as_ref().err())
+                .collect();
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(records.len() >= read_before);
+            read_before = records.len();
+        }
+    };
+    std::thread::scope(|scope| {
+        for writer in 0..4 {
+            scope.spawn(move || write_new_records(writer));
+        }
+        scope.spawn(read_often);
+    });
+}
+
+#[test]
+fn writing_a_record_again_puts_it_in_the_place_of_a_corrupted_one() {
+    let workspace = workspace("written_over_corrupted");
+    let build_directory = workspace.join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+    let whole = fs::read(&path).expect("the record can be read");
+    tamper(&path, r#""value": 7"#, r#""value": 8"#);
+
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+
+    assert_eq!(fs::read(&path).expect("the record can be read"), whole);
+    assert_eq!(files_under(&workspace), [path]);
 }

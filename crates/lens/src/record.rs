@@ -106,6 +106,26 @@ fn is_unfinished_name(name: &str) -> bool {
     parts().is_some_and(|(key, process, writer)| unfinished_name(&key, process, writer) == name)
 }
 
+/// Whether the record with the text `text` is kept in `file` already.
+fn is_kept(file: &Path, text: &str) -> bool {
+    fs::read(file).is_ok_and(|kept| kept == text.as_bytes())
+}
+
+/// Puts the complete record in `unfinished`, with the text `text`, in its
+/// place, `file`. The record is then under both names, or under `file`
+/// alone.
+fn put_in_place(unfinished: &Path, file: &Path, text: &str) -> io::Result<()> {
+    // A second name for the same file takes the place of nothing, so no
+    // record is gone for a moment. It fails when `file` is there, and where
+    // the file system gives no second name to a file.
+    if fs::hard_link(unfinished, file).is_ok() || is_kept(file, text) {
+        return Ok(());
+    }
+    // What is in the place of the record is not the record, such as a
+    // corrupted one: the record is renamed onto it.
+    fs::rename(unfinished, file)
+}
+
 /// Writes records into a build directory, or, when Lens is off, drops them.
 ///
 /// A phase hands every record to its writer, whether Lens is on or off: the
@@ -155,6 +175,8 @@ impl RecordWriter {
     ///
     /// The record is canonical JSON: the same stage, inputs and payload give
     /// the same bytes in the same place under the build directory.
+    /// A record that is there already is left as it is, so a reader beside
+    /// a writer of the same record is given that record at every moment.
     ///
     /// # Errors
     ///
@@ -172,6 +194,12 @@ impl RecordWriter {
         let (envelope, text) = Envelope::seal(stage, inputs().borrow(), payload)?;
 
         let path = record_path(directory, envelope.key());
+        // A record that is there already stays as it is. Nothing is put in
+        // its place, not even the same record: to a reader that lists the
+        // records meanwhile, a file that is replaced can be gone.
+        if is_kept(&path, &text) {
+            return Ok(Some(path));
+        }
         // A reader never sees half a record: the file appears under its
         // name only once it is complete. Its name until then is its
         // writer's alone, so two writers of one record never share it.
@@ -181,18 +209,17 @@ impl RecordWriter {
             std::process::id(),
             WRITES.fetch_add(1, Ordering::Relaxed),
         ));
-        fs::create_dir_all(directory)
-            .and_then(|()| fs::write(&unfinished, text))
-            .and_then(|()| fs::rename(&unfinished, &path))
-            .map_err(|error| {
-                // Nothing of a record that was not written stays behind.
-                // The write already failed, and that is the error to report.
-                let _ = fs::remove_file(&unfinished);
-                WriteError::Io {
-                    path: path.clone(),
-                    error,
-                }
-            })?;
+        let written = fs::create_dir_all(directory)
+            .and_then(|()| fs::write(&unfinished, &text))
+            .and_then(|()| put_in_place(&unfinished, &path, &text));
+        // Nothing of an unfinished record stays behind, written or not. It
+        // is gone already when it was renamed, and when the write failed,
+        // that is the error to report.
+        let _ = fs::remove_file(&unfinished);
+        written.map_err(|error| WriteError::Io {
+            path: path.clone(),
+            error,
+        })?;
         Ok(Some(path))
     }
 }
