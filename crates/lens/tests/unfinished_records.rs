@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use brio_lens::{RecordReader, RecordWriter, WriteError};
 
-use support::{Probe, files_under, inputs, probe, stage, workspace, write_record};
+use support::{Probe, files_under_but_the_lock, inputs, probe, stage, workspace, write_record};
 
 /// What the test leaves in the file of an unfinished record of another
 /// writer.
@@ -53,7 +53,10 @@ fn a_writer_takes_the_next_free_name_for_its_unfinished_record_and_touches_no_ot
     let inputs = inputs("sensor a\n");
     // The first unfinished record of the process, with the number 0.
     let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
-    assert_eq!(files_under(&workspace), std::slice::from_ref(&path));
+    assert_eq!(
+        files_under_but_the_lock(&workspace),
+        std::slice::from_ref(&path)
+    );
 
     // The next three names are taken. The same record key with another
     // payload is to replace the record, so the writer needs an unfinished
@@ -65,7 +68,7 @@ fn a_writer_takes_the_next_free_name_for_its_unfinished_record_and_touches_no_ot
     let replaced = fs::read(&path).expect("the record can be read");
     assert!(String::from_utf8_lossy(&replaced).contains(r#""value": 8"#));
     // Nothing of the writer's own unfinished record stays behind.
-    assert_eq!(files_under(&workspace).len(), left.len() + 1);
+    assert_eq!(files_under_but_the_lock(&workspace).len(), left.len() + 1);
 
     // Every name the writer tries next is taken: it gives up, and gives
     // itself no other name.
@@ -84,7 +87,7 @@ fn a_writer_takes_the_next_free_name_for_its_unfinished_record_and_touches_no_ot
     );
     assert_untouched(&left);
     assert_eq!(fs::read(&path).expect("the record can be read"), replaced);
-    assert_eq!(files_under(&workspace).len(), left.len() + 1);
+    assert_eq!(files_under_but_the_lock(&workspace).len(), left.len() + 1);
 
     // A reader passes over every one of these names, and is given the
     // record.

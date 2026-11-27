@@ -15,8 +15,9 @@ use brio_lens::{
 };
 
 use support::{
-    Forge, Gauge, Loose, Probe, assert_forgeries_are_corrupted, envelopes, files_under, inputs,
-    nested, probe, refusal, resealed, stage, tamper, with_its_own_digest, workspace, write_record,
+    Forge, Gauge, Loose, Probe, assert_forgeries_are_corrupted, envelopes, files_under,
+    files_under_but_the_lock, inputs, lock_file, nested, probe, refusal, resealed, stage, tamper,
+    with_its_own_digest, workspace, write_record,
 };
 
 /// A payload of numbers that are not whole.
@@ -124,7 +125,7 @@ fn writers_of_the_same_record_at_the_same_time_all_succeed() {
         }
     });
 
-    assert_eq!(files_under(&build_directory).len(), 1);
+    assert_eq!(files_under_but_the_lock(&build_directory).len(), 1);
     RecordReader::in_build_directory(&build_directory)
         .read(&stage, &inputs)
         .expect("the record is read");
@@ -191,7 +192,13 @@ fn records_are_written_under_the_build_directory_and_nowhere_else() {
     );
 
     assert!(path.starts_with(&build_directory));
-    assert_eq!(files_under(&workspace), [path]);
+    // Beside the record, the writer made the lock file of the build
+    // directory, and nothing else.
+    let mut files = files_under(&workspace);
+    files.sort();
+    let mut expected = [path, lock_file(&build_directory)];
+    expected.sort();
+    assert_eq!(files, expected);
 }
 
 #[test]
@@ -572,7 +579,7 @@ fn an_elements_payload_is_read_back_at_the_deepest_nesting_and_refused_beyond_it
              at most 124 levels"
         )
     );
-    assert_eq!(files_under(&workspace), [path]);
+    assert_eq!(files_under_but_the_lock(&workspace), [path]);
 }
 
 #[test]
@@ -613,7 +620,7 @@ fn a_write_that_fails_leaves_nothing_behind() {
         .expect_err("the record cannot be written");
 
     assert!(matches!(error, WriteError::Io { .. }));
-    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
+    assert_eq!(files_under_but_the_lock(&workspace), Vec::<PathBuf>::new());
 }
 
 /// A payload type whose kind breaks the rule on payload kinds.
@@ -960,7 +967,7 @@ fn a_file_that_is_not_named_as_a_record_is_given_as_an_error_and_hides_no_other_
         .expect("the records are read");
 
     // Each file gives a record or an error, in the order of the file names.
-    let mut files = files_under(&build_directory);
+    let mut files = files_under_but_the_lock(&build_directory);
     files.sort();
     let expected: Vec<Option<&PathBuf>> = files
         .iter()
@@ -1085,7 +1092,7 @@ fn writing_a_record_again_leaves_the_file_that_is_there() {
         fs::read_to_string(&path).expect("the record can be read"),
         "the same file\n"
     );
-    assert_eq!(files_under(&build_directory), [path]);
+    assert_eq!(files_under_but_the_lock(&build_directory), [path]);
 }
 
 #[test]
@@ -1101,7 +1108,7 @@ fn writing_a_record_again_puts_it_in_the_place_of_a_corrupted_one() {
     write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
 
     assert_eq!(fs::read(&path).expect("the record can be read"), whole);
-    assert_eq!(files_under(&workspace), [path]);
+    assert_eq!(files_under_but_the_lock(&workspace), [path]);
 }
 
 #[test]

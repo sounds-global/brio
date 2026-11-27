@@ -12,7 +12,7 @@ use brio_lens::{
 
 use support::{
     Forge, Loose, Probe, assert_forgeries_are_corrupted, build_directory, envelopes, files_under,
-    inputs, nested, probe, resealed, stage, workspace, write_record,
+    files_under_but_the_lock, inputs, nested, probe, resealed, stage, workspace, write_record,
 };
 
 /// The source of the module `app::main`.
@@ -333,7 +333,7 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
             "a reason of the element `{a}` nests 123 deep, but a reason nests at most 122 levels"
         )
     );
-    assert_eq!(files_under(&workspace), [path]);
+    assert_eq!(files_under_but_the_lock(&workspace), [path]);
 }
 
 /// One element with a source span, a previous-stage element and a reason.
