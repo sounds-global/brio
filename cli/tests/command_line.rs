@@ -571,7 +571,7 @@ fn lens_test_is_an_error_when_a_record_is_misnamed_in_both_record_sets() {
     assert_eq!(
         stderr(&output),
         format!(
-            "brio: `{}` is among the records and is not named for a record key\n",
+            "brio: `{}` is among the records and is not the file of a record\n",
             misnamed.display()
         )
     );

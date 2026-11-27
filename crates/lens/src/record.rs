@@ -86,9 +86,12 @@ fn record_key_of(file: &Path) -> Option<RecordKey> {
 }
 
 /// The name of the file of an unfinished record: where a writer keeps the
-/// record with one record key until it is complete. It has the process of
-/// the writer and a number, so the name is that writer's alone, for that
-/// one record.
+/// record with one record key until it is complete. It has the identifier
+/// of the writer's process and a number.
+///
+/// Two processes can have one identifier, so the name alone is not that
+/// writer's own: a writer takes a name only by making a new file with it,
+/// in [`new_unfinished_file`].
 ///
 /// The writer makes the name and the reader knows it again, both here, so
 /// they cannot come to name it differently.
@@ -128,13 +131,18 @@ impl fmt::Display for UnfinishedName {
 }
 
 /// How many names a writer tries for one unfinished record before it gives
-/// up: each is taken only when another process has the same number, or
-/// when a writer with that name was stopped.
+/// up. A name is taken only when another process has the same identifier
+/// and has given the same number, or when a writer with that name was
+/// stopped.
 const UNFINISHED_NAMES_TRIED: usize = 64;
 
-/// Whether `file` holds the record with the text `text`, whole.
+/// Whether `file` is a file and holds the record with the text `text`,
+/// whole.
 fn holds_record(file: &Path, text: &str) -> bool {
-    fs::read(file).is_ok_and(|held| held == text.as_bytes())
+    // Only a file is read: reading what else can have the name, such as a
+    // pipe, may never end.
+    fs::metadata(file).is_ok_and(|metadata| metadata.is_file())
+        && fs::read(file).is_ok_and(|held| held == text.as_bytes())
 }
 
 /// Makes, in `records_directory`, the file of an unfinished record with
@@ -142,12 +150,11 @@ fn holds_record(file: &Path, text: &str) -> bool {
 ///
 /// The file is new, and this writer's alone. A name that is taken is left
 /// to the writer that has it: writing into it, or removing it, would
-/// reach the unfinished record of another process with the same number,
-/// or a record itself, which a writer that was stopped left under a
-/// second name.
+/// reach the unfinished record of another process with the same identifier
+/// and number, or a record itself, which a writer that was stopped left
+/// under a second name.
 fn new_unfinished_file(records_directory: &Path, key: &RecordKey) -> io::Result<(PathBuf, File)> {
     static UNFINISHED_RECORDS: AtomicU64 = AtomicU64::new(0);
-    let mut taken = None;
     for _ in 0..UNFINISHED_NAMES_TRIED {
         let name = UnfinishedName {
             key: key.clone(),
@@ -157,11 +164,14 @@ fn new_unfinished_file(records_directory: &Path, key: &RecordKey) -> io::Result<
         let place = records_directory.join(name.to_string());
         match File::create_new(&place) {
             Ok(file) => return Ok((place, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => taken = Some(error),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }
-    Err(taken.unwrap_or_else(|| io::ErrorKind::AlreadyExists.into()))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "every name for its unfinished record is taken",
+    ))
 }
 
 /// Writes the record with `key` and the text `text` into `records_directory`,
@@ -171,33 +181,44 @@ fn write_record(records_directory: &Path, key: &RecordKey, text: &str) -> io::Re
     // A reader never sees half a record: the record is written under an
     // unfinished name, and gets its own name only once it is complete.
     let (unfinished, mut file) = new_unfinished_file(records_directory, key)?;
-    let written = file
+    let placed = file
         .write_all(text.as_bytes())
         .and_then(|()| put_in_place(&unfinished, &record_path(records_directory, key), text));
     // Nothing of this writer's unfinished record stays behind, written or
-    // not. The name is gone already when the record was renamed, and when
-    // the write failed, that is the error to report.
-    let _ = fs::remove_file(&unfinished);
-    written
+    // not. Once the record was renamed, the name is this writer's no more:
+    // what has it since is the unfinished record of another, and is left.
+    // When the write failed, that is the error to report.
+    if !matches!(placed, Ok(Placed::Renamed)) {
+        let _ = fs::remove_file(&unfinished);
+    }
+    placed.map(|_| ())
+}
+
+/// How a complete record came to be in its place.
+enum Placed {
+    /// The record is there, and the unfinished name is still a name of this
+    /// writer's file.
+    BesideUnfinished,
+    /// The unfinished file was renamed: its unfinished name is free.
+    Renamed,
 }
 
 /// Puts the complete record in `unfinished`, with the text `text`, in its
-/// place, `file`. The record is then under both names, or under `file`
-/// alone.
-fn put_in_place(unfinished: &Path, file: &Path, text: &str) -> io::Result<()> {
+/// place, `file`.
+fn put_in_place(unfinished: &Path, file: &Path, text: &str) -> io::Result<Placed> {
     // A second name for the same file takes the place of nothing, so no
     // record is gone for a moment. It fails when `file` is there, and where
     // the file system gives no second name to a file. When it fails because
     // another writer put the same record there meanwhile, there is nothing
     // left to do.
     if fs::hard_link(unfinished, file).is_ok() || holds_record(file, text) {
-        return Ok(());
+        return Ok(Placed::BesideUnfinished);
     }
-    // The record is renamed into its place. It takes the place of nothing
-    // where the file system gave it no second name, and otherwise of a file
-    // with other bytes: a corrupted record, or a record of the same record
-    // key that a stage made otherwise.
-    fs::rename(unfinished, file)
+    // The record is renamed into its place, and onto what is there: a
+    // corrupted record, a record of the same record key that a stage made
+    // otherwise, or something that is no record. Nothing is there when the
+    // file system only gave the record no second name.
+    fs::rename(unfinished, file).map(|()| Placed::Renamed)
 }
 
 /// Writes records into a build directory, or, when Lens is off, drops them.
@@ -382,7 +403,8 @@ impl RecordReader {
     ///
     /// So is anything else among the records of the build directory, as
     /// [`ReadError::NotARecord`]: a file with another name than a record
-    /// has, a hidden file, a directory. A record with the wrong name would
+    /// has, a hidden file, a directory under any name. A record with the
+    /// wrong name would
     /// otherwise be missing from the records as if they were whole, so
     /// nothing is kept beside the records, not even a `.gitkeep`.
     ///
@@ -439,10 +461,18 @@ fn read_record(file: &Path, stored_under: &RecordKey) -> Result<Record<Untyped>,
         path: file.to_owned(),
         defect,
     };
-    let bytes = fs::read(file).map_err(|error| ReadError::Io {
+    let io_error = |error| ReadError::Io {
         path: file.to_owned(),
         error,
-    })?;
+    };
+    // Only a file is read: reading what else can have the name of a record,
+    // such as a pipe, may never end.
+    if !fs::metadata(file).map_err(io_error)?.is_file() {
+        return Err(ReadError::NotARecord {
+            path: file.to_owned(),
+        });
+    }
+    let bytes = fs::read(file).map_err(io_error)?;
     let text = String::from_utf8(bytes).map_err(|_| defective(RecordDefect::Corrupted))?;
     let envelope = Envelope::open(&text, stored_under).map_err(defective)?;
     Ok(Record {
@@ -469,8 +499,9 @@ pub enum ReadError {
         /// What the file system reported.
         error: io::Error,
     },
-    /// Something among the records of a build directory is not named for a
-    /// record key, as every record is, so it is not read as a record.
+    /// Something among the records of a build directory is not the file of
+    /// a record, so it is not read as one: it is not named for a record
+    /// key, as every record is, or it is not a file.
     NotARecord {
         /// The file or directory.
         path: PathBuf,
@@ -515,7 +546,7 @@ impl fmt::Display for ReadError {
             Self::Io { path, error } => write!(f, "`{}` cannot be read: {error}", path.display()),
             Self::NotARecord { path } => write!(
                 f,
-                "`{}` is among the records and is not named for a record key",
+                "`{}` is among the records and is not the file of a record",
                 path.display()
             ),
             Self::Defective { path, defect } => {
