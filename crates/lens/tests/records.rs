@@ -978,18 +978,46 @@ fn a_file_that_is_not_named_as_a_record_is_given_as_an_error_and_hides_no_other_
     assert_eq!(not_records.iter().flatten().count(), 2);
 }
 
-/// The file where the writer `writer` of the process `process` keeps the
-/// record of the file `record` until it is complete.
-fn unfinished_file(record: &Path, process: &str, writer: &str) -> PathBuf {
-    record.with_extension(format!("{process}-{writer}.unfinished"))
+/// The file of the unfinished record with the number `number` in the
+/// process `process`, for the record of the file `record`.
+fn unfinished_record(record: &Path, process: &str, number: &str) -> PathBuf {
+    record.with_extension(format!("{process}-{number}.unfinished"))
 }
 
-/// The file of every unfinished record that a writer of this process can
-/// keep for the record of the file `record`: one for each writer the
-/// process has, and it has fewer than these in the whole of these tests.
-fn unfinished_files_of_this_process(record: &Path) -> impl Iterator<Item = PathBuf> {
+/// What a test leaves in the file of an unfinished record that no writer of
+/// the test made.
+const NOT_THIS_WRITERS: &str = "the unfinished record of another writer\n";
+
+/// Leaves, for the record of the file `record`, the unfinished record of
+/// another writer under each of the next names a writer of this process
+/// gives, when `taken` says so of its number. Gives the files it left.
+///
+/// The names are numbered in the whole process, and these are more than the
+/// process makes in the whole of these tests.
+fn take_unfinished_names(record: &Path, taken: fn(u64) -> bool) -> Vec<PathBuf> {
     let process = std::process::id().to_string();
-    (0..2000).map(move |writer| unfinished_file(record, &process, &writer.to_string()))
+    let left: Vec<PathBuf> = (0..2000)
+        .filter(|number| taken(*number))
+        .map(|number| unfinished_record(record, &process, &number.to_string()))
+        .collect();
+    for file in &left {
+        fs::write(file, NOT_THIS_WRITERS).expect("an unfinished record can be added");
+    }
+    left
+}
+
+/// Checks that each of the files `left` still holds the unfinished record a
+/// test left there.
+fn assert_untouched(left: &[PathBuf]) {
+    for file in left {
+        let held = fs::read_to_string(file);
+        assert_eq!(
+            held.ok().as_deref(),
+            Some(NOT_THIS_WRITERS),
+            "{}",
+            file.display()
+        );
+    }
 }
 
 #[test]
@@ -1002,8 +1030,8 @@ fn a_record_that_a_writer_has_not_finished_is_no_record_yet() {
         &probe(&[("a", 7)]),
     );
     // What a writer of the same record leaves until its record is complete.
-    fs::write(unfinished_file(&path, "4242", "0"), "{\n  \"dig")
-        .expect("an unfinished file can be added");
+    fs::write(unfinished_record(&path, "4242", "0"), "{\n  \"dig")
+        .expect("an unfinished record can be added");
 
     let records = RecordReader::in_build_directory(&build_directory)
         .read_all()
@@ -1030,8 +1058,9 @@ fn a_file_named_as_unfinished_that_no_writer_made_is_given_as_an_error() {
         fs::write(path.with_file_name(name), text).expect("a foreign file can be added");
     }
     // No process has so high a number, and no writer keeps a directory.
-    fs::write(unfinished_file(&path, "99999999999", "0"), "").expect("a foreign file can be added");
-    fs::create_dir(unfinished_file(&path, "4242", "1")).expect("a directory can be added");
+    fs::write(unfinished_record(&path, "99999999999", "0"), "")
+        .expect("a foreign file can be added");
+    fs::create_dir(unfinished_record(&path, "4242", "1")).expect("a directory can be added");
 
     let records = RecordReader::in_build_directory(&build_directory)
         .read_all()
@@ -1096,26 +1125,52 @@ fn writing_a_record_again_leaves_the_file_that_is_there() {
 }
 
 #[test]
-fn a_writer_keeps_its_unfinished_record_under_a_name_that_readers_pass_over() {
-    let build_directory = workspace("unfinished_name").join(".brio");
+fn a_writer_names_its_unfinished_record_as_readers_expect_and_fails_when_every_name_is_taken() {
+    let build_directory = workspace("unfinished_names_taken").join(".brio");
     let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\n");
     let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
     let whole = fs::read(&path).expect("the record can be read");
-    // Every name a writer of this process can keep its unfinished record
-    // under is taken, by what no writer can make its file of.
-    for taken in unfinished_files_of_this_process(&path) {
-        fs::create_dir(taken).expect("a directory can be added");
-    }
+    let left = take_unfinished_names(&path, |_| true);
 
     // The same record key, and another payload: the record is to be
-    // replaced, so the writer needs its unfinished record.
+    // replaced, so the writer needs an unfinished record.
     let error = RecordWriter::in_build_directory(&build_directory)
         .write(&stage, || &inputs, &probe(&[("a", 8)]))
-        .expect_err("the writer has nowhere to keep its unfinished record");
+        .expect_err("the writer has no name left for its unfinished record");
 
+    // The writer gives no other name than these, and takes none of them
+    // from the writer that has it.
     assert!(matches!(error, WriteError::Io { .. }));
+    assert_untouched(&left);
     assert_eq!(fs::read(&path).expect("the record can be read"), whole);
+    // A reader passes over every one of these names.
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].is_ok(), "{records:?}");
+}
+
+#[test]
+fn a_writer_never_touches_the_unfinished_record_of_another_writer() {
+    let workspace = workspace("unfinished_names_of_others");
+    let build_directory = workspace.join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+    let whole = fs::read(&path).expect("the record can be read");
+    // Another writer has most of the next names: one of another process
+    // with the same number, or one that was stopped.
+    let left = take_unfinished_names(&path, |number| number % 8 != 0);
+
+    // The same record key, and another payload.
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 8)]));
+
+    assert_untouched(&left);
+    assert_ne!(fs::read(&path).expect("the record can be read"), whole);
+    // Nothing of this writer's own unfinished record stays behind.
+    assert_eq!(files_under(&workspace).len(), left.len() + 1);
 }
 
 #[test]
@@ -1135,35 +1190,25 @@ fn writing_a_record_again_puts_it_in_the_place_of_a_corrupted_one() {
 }
 
 #[test]
-fn a_name_a_stopped_writer_left_is_never_written_through_and_is_passed_over() {
-    let workspace = workspace("stopped_writer");
-    let build_directory = workspace.join(".brio");
-    let stage = stage::<Probe>("app::main");
-    let inputs = inputs("sensor a\n");
-    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
-    let whole = fs::read(&path).expect("the record can be read");
-    // A reader that has the record open: another name of the same file.
-    let open_record = workspace.join("open-record");
-    fs::hard_link(&path, &open_record).expect("the record can be given a second name");
-    // What a writer leaves when it is stopped once its record is in place:
-    // its unfinished name, still a name of the record. The next writers of
-    // this process make the same names.
-    for left in unfinished_files_of_this_process(&path) {
-        fs::hard_link(&path, left).expect("the record can be given a second name");
-    }
-
-    // The same record key, and another payload.
-    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 8)]));
-
-    assert_eq!(
-        fs::read(&open_record).expect("the open record can be read"),
-        whole
+fn a_hidden_file_and_a_directory_among_the_records_are_given_as_errors() {
+    let build_directory = workspace("hidden_file_and_directory").join(".brio");
+    let path = write_record(
+        &build_directory,
+        &stage::<Probe>("app::main"),
+        &inputs("sensor a\n"),
+        &probe(&[("a", 7)]),
     );
-    assert_ne!(fs::read(&path).expect("the record can be read"), whole);
-    // A reader passes over every name that is left, and is given the record.
+    fs::write(path.with_file_name(".gitkeep"), "").expect("a hidden file can be added");
+    fs::create_dir(path.with_file_name("kept")).expect("a directory can be added");
+
     let records = RecordReader::in_build_directory(&build_directory)
         .read_all()
         .expect("the records are read");
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert!(records[0].is_ok(), "{records:?}");
+
+    let not_records = records
+        .iter()
+        .filter(|record| matches!(record, Err(ReadError::NotARecord { .. })))
+        .count();
+    assert_eq!(not_records, 2);
+    assert_eq!(records.iter().flatten().count(), 1);
 }

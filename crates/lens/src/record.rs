@@ -4,7 +4,7 @@
 
 use std::borrow::Borrow;
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -85,28 +85,30 @@ fn record_key_of(file: &Path) -> Option<RecordKey> {
     RecordKey::from_hex(key.to_owned())
 }
 
-/// The name of the file of an unfinished record: where one writer of one
-/// process keeps the record with one record key until it is complete. The
-/// name is that writer's alone.
+/// The name of the file of an unfinished record: where a writer keeps the
+/// record with one record key until it is complete. It has the process of
+/// the writer and a number, so the name is that writer's alone, for that
+/// one record.
 ///
 /// The writer makes the name and the reader knows it again, both here, so
 /// they cannot come to name it differently.
 struct UnfinishedName {
     key: RecordKey,
     process: u32,
-    writer: u64,
+    /// What tells this unfinished record from every other of its process.
+    number: u64,
 }
 
 impl UnfinishedName {
     /// The unfinished name that `name` is, or `None` when it is the name of
     /// something else: no writer, of any process, gives it.
     fn parse(name: &str) -> Option<Self> {
-        let (key, writer) = name.strip_suffix(UNFINISHED_SUFFIX)?.rsplit_once('.')?;
-        let (process, writer) = writer.split_once('-')?;
+        let (key, numbers) = name.strip_suffix(UNFINISHED_SUFFIX)?.rsplit_once('.')?;
+        let (process, number) = numbers.split_once('-')?;
         let parsed = Self {
             key: RecordKey::from_hex(key.to_owned())?,
             process: process.parse().ok()?,
-            writer: writer.parse().ok()?,
+            number: number.parse().ok()?,
         };
         // A number can be written in more than one way, and a writer writes
         // it in one.
@@ -119,29 +121,64 @@ impl fmt::Display for UnfinishedName {
         let Self {
             key,
             process,
-            writer,
+            number,
         } = self;
-        write!(f, "{key}.{process}-{writer}{UNFINISHED_SUFFIX}")
+        write!(f, "{key}.{process}-{number}{UNFINISHED_SUFFIX}")
     }
 }
+
+/// How many names a writer tries for one unfinished record before it gives
+/// up: each is taken only when another process has the same number, or
+/// when a writer with that name was stopped.
+const UNFINISHED_NAMES_TRIED: usize = 64;
 
 /// Whether `file` holds the record with the text `text`, whole.
 fn holds_record(file: &Path, text: &str) -> bool {
     fs::read(file).is_ok_and(|held| held == text.as_bytes())
 }
 
-/// Writes the record with the text `text` into the new file `unfinished`.
-fn write_unfinished(unfinished: &Path, text: &str) -> io::Result<()> {
-    // A writer that was stopped once its record was in place left its
-    // unfinished name behind, as a second name of that record. The name is
-    // removed, and the file is made anew: writing into what is there would
-    // write into the record itself, under the eyes of its readers.
-    match fs::remove_file(unfinished) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
+/// Makes, in `records_directory`, the file of an unfinished record with
+/// `key`, and gives it with its place.
+///
+/// The file is new, and this writer's alone. A name that is taken is left
+/// to the writer that has it: writing into it, or removing it, would
+/// reach the unfinished record of another process with the same number,
+/// or a record itself, which a writer that was stopped left under a
+/// second name.
+fn new_unfinished_file(records_directory: &Path, key: &RecordKey) -> io::Result<(PathBuf, File)> {
+    static UNFINISHED_RECORDS: AtomicU64 = AtomicU64::new(0);
+    let mut taken = None;
+    for _ in 0..UNFINISHED_NAMES_TRIED {
+        let name = UnfinishedName {
+            key: key.clone(),
+            process: std::process::id(),
+            number: UNFINISHED_RECORDS.fetch_add(1, Ordering::Relaxed),
+        };
+        let place = records_directory.join(name.to_string());
+        match File::create_new(&place) {
+            Ok(file) => return Ok((place, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => taken = Some(error),
+            Err(error) => return Err(error),
+        }
     }
-    let mut file = fs::File::create_new(unfinished)?;
-    file.write_all(text.as_bytes())
+    Err(taken.unwrap_or_else(|| io::ErrorKind::AlreadyExists.into()))
+}
+
+/// Writes the record with `key` and the text `text` into `records_directory`,
+/// under the name of that record.
+fn write_record(records_directory: &Path, key: &RecordKey, text: &str) -> io::Result<()> {
+    fs::create_dir_all(records_directory)?;
+    // A reader never sees half a record: the record is written under an
+    // unfinished name, and gets its own name only once it is complete.
+    let (unfinished, mut file) = new_unfinished_file(records_directory, key)?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| put_in_place(&unfinished, &record_path(records_directory, key), text));
+    // Nothing of this writer's unfinished record stays behind, written or
+    // not. The name is gone already when the record was renamed, and when
+    // the write failed, that is the error to report.
+    let _ = fs::remove_file(&unfinished);
+    written
 }
 
 /// Puts the complete record in `unfinished`, with the text `text`, in its
@@ -150,15 +187,16 @@ fn write_unfinished(unfinished: &Path, text: &str) -> io::Result<()> {
 fn put_in_place(unfinished: &Path, file: &Path, text: &str) -> io::Result<()> {
     // A second name for the same file takes the place of nothing, so no
     // record is gone for a moment. It fails when `file` is there, and where
-    // the file system gives no second name to a file.
-    // When it fails because another writer put the same record there
-    // meanwhile, there is nothing left to do.
+    // the file system gives no second name to a file. When it fails because
+    // another writer put the same record there meanwhile, there is nothing
+    // left to do.
     if fs::hard_link(unfinished, file).is_ok() || holds_record(file, text) {
         return Ok(());
     }
-    // What is in the place of the record has other bytes: a corrupted
-    // record, or a record of the same record key that a stage made
-    // otherwise. The record is renamed onto it.
+    // The record is renamed into its place. It takes the place of nothing
+    // where the file system gave it no second name, and otherwise of a file
+    // with other bytes: a corrupted record, or a record of the same record
+    // key that a stage made otherwise.
     fs::rename(unfinished, file)
 }
 
@@ -237,24 +275,7 @@ impl RecordWriter {
         if holds_record(&path, &text) {
             return Ok(Some(path));
         }
-        // A reader never sees half a record: the file appears under its
-        // name only once it is complete. Its name until then is its
-        // writer's alone, so two writers of one record never share it.
-        static WRITES: AtomicU64 = AtomicU64::new(0);
-        let unfinished = UnfinishedName {
-            key: envelope.key().clone(),
-            process: std::process::id(),
-            writer: WRITES.fetch_add(1, Ordering::Relaxed),
-        };
-        let unfinished = directory.join(unfinished.to_string());
-        let written = fs::create_dir_all(directory)
-            .and_then(|()| write_unfinished(&unfinished, &text))
-            .and_then(|()| put_in_place(&unfinished, &path, &text));
-        // Nothing of an unfinished record stays behind, written or not. It
-        // is gone already when it was renamed, and when the write failed,
-        // that is the error to report.
-        let _ = fs::remove_file(&unfinished);
-        written.map_err(|error| WriteError::Io {
+        write_record(directory, envelope.key(), &text).map_err(|error| WriteError::Io {
             path: path.clone(),
             error,
         })?;
@@ -361,8 +382,8 @@ impl RecordReader {
     ///
     /// So is anything else among the records of the build directory, as
     /// [`ReadError::NotARecord`]: a file with another name than a record
-    /// has, a hidden file, a directory. A reader is never given the records
-    /// of a build directory with one missing as if they were whole, so
+    /// has, a hidden file, a directory. A record with the wrong name would
+    /// otherwise be missing from the records as if they were whole, so
     /// nothing is kept beside the records, not even a `.gitkeep`.
     ///
     /// Only a record its writer has not finished is passed over: it is no
@@ -390,8 +411,10 @@ impl RecordReader {
         for entry in fs::read_dir(&self.directory).map_err(io_error)? {
             let entry = entry.map_err(io_error)?;
             // A writer keeps an unfinished record in a file: a directory or
-            // a link with such a name is not one. A file that is gone
-            // before its type is known was one, finished since.
+            // a link with such a name is not one. What has such a name and
+            // no type that can be told is passed over as well: it is gone
+            // since it was listed, as an unfinished record is once it is
+            // finished.
             let named_unfinished = |name: &str| UnfinishedName::parse(name).is_some();
             let unfinished = entry.file_name().to_str().is_some_and(named_unfinished)
                 && entry.file_type().map_or(true, |kind| kind.is_file());
