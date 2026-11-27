@@ -2,6 +2,7 @@
 
 //! Writing records into the build directory and reading them back.
 
+use std::borrow::Borrow;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -77,8 +78,16 @@ fn record_path(records_directory: &Path, key: &RecordKey) -> PathBuf {
 /// [disabled](RecordWriter::disabled) writer does no work for a record.
 #[derive(Debug)]
 pub struct RecordWriter {
-    /// Where the records are kept, or `None` when Lens is off.
-    directory: Option<PathBuf>,
+    lens: Lens,
+}
+
+/// Whether a build records what it does.
+#[derive(Debug)]
+enum Lens {
+    /// Lens is on: records are kept in `directory`.
+    On { directory: PathBuf },
+    /// Lens is off: no record is made.
+    Off,
 }
 
 impl RecordWriter {
@@ -86,21 +95,27 @@ impl RecordWriter {
     #[must_use]
     pub fn in_build_directory(build_directory: impl Into<PathBuf>) -> Self {
         Self {
-            directory: Some(records_directory(build_directory.into())),
+            lens: Lens::On {
+                directory: records_directory(build_directory.into()),
+            },
         }
     }
 
     /// The writer of a build with Lens off. It drops every record and does
-    /// no work for it: it never asks a payload for its elements, and it
-    /// serializes, hashes and writes nothing.
+    /// no work for it: it never asks for the inputs of a record or for the
+    /// elements of a payload, and it serializes, hashes and writes nothing.
     #[must_use]
     pub fn disabled() -> Self {
-        Self { directory: None }
+        Self { lens: Lens::Off }
     }
 
     /// Writes the record of what `stage` produced, as `payload`, from
     /// `inputs`, and gives the file it was written to, or `None` when this
     /// is the [disabled](RecordWriter::disabled) writer.
+    ///
+    /// `inputs` gives the inputs of the record, owned or borrowed, as in
+    /// `|| &inputs`. It is called only when the record is made, so a phase
+    /// gathers and copies nothing for a record that is not written.
     ///
     /// The record is canonical JSON: the same stage, inputs and payload give
     /// the same bytes in the same place under the build directory.
@@ -109,16 +124,16 @@ impl RecordWriter {
     ///
     /// Fails when Lens refuses to make the record, for a [`RecordRefusal`],
     /// or when the file cannot be written. The disabled writer never fails.
-    pub fn write<P: Payload>(
+    pub fn write<P: Payload, I: Borrow<RecordInputs>>(
         &self,
         stage: &Stage<P>,
-        inputs: &RecordInputs,
+        inputs: impl FnOnce() -> I,
         payload: &P,
     ) -> Result<Option<PathBuf>, WriteError> {
-        let Some(directory) = &self.directory else {
+        let Lens::On { directory } = &self.lens else {
             return Ok(None);
         };
-        let (envelope, text) = Envelope::seal(stage, inputs, payload)?;
+        let (envelope, text) = Envelope::seal(stage, inputs().borrow(), payload)?;
 
         let path = record_path(directory, envelope.key());
         // A reader never sees half a record: the file appears under its

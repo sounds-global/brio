@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use brio_lens::json::{self, Value, json};
 use brio_lens::{
     Element, ElementTable, Envelope, Payload, PayloadType, ReadError, RecordDefect, RecordInputs,
-    RecordReader, Stage,
+    RecordReader, RecordWriter, Stage,
 };
 
 /// A payload no phase owns: the reading of every sensor a module declares.
@@ -138,6 +138,20 @@ impl Payload for Loose {
     fn from_elements(_elements: &ElementTable) -> Option<Self> {
         Some(Self(|_| Vec::new()))
     }
+}
+
+/// Writes the record of what `stage` produced, as `payload`, from `inputs`,
+/// into `build_directory`, with Lens on, and gives the file of the record.
+pub fn write_record<P: Payload>(
+    build_directory: impl Into<PathBuf>,
+    stage: &Stage<P>,
+    inputs: &RecordInputs,
+    payload: &P,
+) -> PathBuf {
+    RecordWriter::in_build_directory(build_directory)
+        .write(stage, || inputs, payload)
+        .expect("the record is written")
+        .expect("the writer is not the disabled writer")
 }
 
 /// The stage of payload `P` for `module`.

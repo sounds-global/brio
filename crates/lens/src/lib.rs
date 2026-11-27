@@ -12,7 +12,8 @@
 //! [`RecordWriter`]. Any tool reads the records back with a [`RecordReader`],
 //! with or without knowing their payload types.
 //!
-//! A phase keeps a confidential value out of its records with [`masked`].
+//! A phase keeps a confidential value out of its records with
+//! [`Element::masked_at`] and [`Reason::masked_at`].
 //! When Lens is off, it hands its records to [`RecordWriter::disabled`],
 //! which drops them and does no work.
 
@@ -42,7 +43,6 @@ pub use element::{Element, ElementTable};
 pub use envelope::{Envelope, RecordDefect, RecordRefusal};
 pub use identity::StableId;
 pub use inputs::{RecordInputs, RecordKey};
-pub use mask::{is_masked, masked};
 pub use payload::{InvalidPayloadKind, Payload, PayloadSchema, PayloadType};
 pub use provenance::{ElementLink, OriginStep, Provenance, SourceSpan};
 pub use reason::Reason;

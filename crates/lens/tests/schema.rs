@@ -9,11 +9,11 @@ use std::fs;
 
 use brio_lens::json::{self, Value, json};
 use brio_lens::{
-    Element, InvalidPayloadKind, PayloadSchema, PayloadType, Reason, RecordWriter, Schema,
-    SchemaError, SourceSpan, masked,
+    Element, InvalidPayloadKind, PayloadSchema, PayloadType, Reason, Schema, SchemaError,
+    SourceSpan,
 };
 
-use support::{Loose, inputs, stage, workspace};
+use support::{Loose, inputs, stage, workspace, write_record};
 
 /// A payload type no phase owns: declared here, outside `brio_lens`. Schema
 /// assembly needs what it declares and nothing else.
@@ -277,27 +277,25 @@ fn required(definition: &Value) -> BTreeSet<&str> {
 #[test]
 fn a_written_record_has_exactly_the_fields_the_schema_describes() {
     let build_directory = workspace("schema_fields").join(".brio");
-    let path = RecordWriter::in_build_directory(&build_directory)
-        .write(
-            &stage::<Loose>("app::main"),
-            &inputs("sensor a\n"),
-            &Loose(|stage| {
-                let other = stage.link(&["other"]);
-                vec![
-                    Element::new(stage.id(&["a"]), json!(1))
-                        .from_source(SourceSpan {
-                            file: "src/main.brio".to_owned(),
-                            start: 0,
-                            end: 8,
-                        })
-                        .derived_from(other.clone())
-                        .created_by("inlining", other.clone())
-                        .because(Reason::new("a", json!("why")).involving(other)),
-                ]
-            }),
-        )
-        .expect("the record is written")
-        .expect("Lens is on");
+    let path = write_record(
+        &build_directory,
+        &stage::<Loose>("app::main"),
+        &inputs("sensor a\n"),
+        &Loose(|stage| {
+            let other = stage.link(&["other"]);
+            vec![
+                Element::new(stage.id(&["a"]), json!(1))
+                    .from_source(SourceSpan {
+                        file: "src/main.brio".to_owned(),
+                        start: 0,
+                        end: 8,
+                    })
+                    .derived_from(other.clone())
+                    .created_by("inlining", other.clone())
+                    .because(Reason::new("a", json!("why")).involving(other)),
+            ]
+        }),
+    );
     let text = fs::read_to_string(path).expect("the record can be read");
     let record: Value = json::from_str(&text).expect("the record is JSON");
     let schema = envelope_schema();
@@ -353,18 +351,22 @@ fn the_schema_admits_no_field_and_no_name_that_a_reader_rejects() {
 }
 
 #[test]
-fn the_schema_describes_the_masked_marker_as_it_is_written() {
+fn the_schema_describes_the_masked_markers_of_a_payload_and_of_a_reason() {
     let schema = envelope_schema();
-    let marker = &schema["$defs"]["masked"];
 
+    let marker = &schema["$defs"]["masked_marker"];
     assert!(
         !marker["description"]
             .as_str()
             .unwrap_or_default()
             .is_empty()
     );
-    assert_eq!(marker["additionalProperties"], false);
-    assert_eq!(fields(&masked("hunter2")), required(marker));
-    assert_eq!(marker["properties"]["$masked"], json!({ "const": true }));
-    assert_eq!(masked("hunter2"), json!({ "$masked": true }));
+    assert_eq!(marker["type"], "string");
+    assert_eq!(marker["format"], "json-pointer");
+
+    for name in ["element", "reason"] {
+        let markers = &schema["$defs"][name]["properties"]["masked"];
+        assert_eq!(markers["type"], "array", "of `{name}`");
+        assert_eq!(markers["items"], to("masked_marker"), "of `{name}`");
+    }
 }

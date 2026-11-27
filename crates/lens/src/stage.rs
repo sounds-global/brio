@@ -121,7 +121,9 @@ impl<P> Stage<P> {
     /// the outside in, such as `["main", "parameter", "count"]`. Build it
     /// from what identifies the element among its siblings, such as a name.
     /// Never build it from a text offset, a counter over the whole module or
-    /// a memory address: these change when an unrelated element does.
+    /// a memory address: these change when an unrelated element does. Never
+    /// build it from a confidential value either: a stable identifier is
+    /// written in the record, and nothing masks it.
     #[must_use]
     pub fn id(&self, place: &[&str]) -> StableId {
         self.identity.id(place)

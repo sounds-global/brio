@@ -250,11 +250,6 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
             depth,
         });
     }
-    if mask::has_malformed_marker(&element.payload) {
-        return Err(RecordRefusal::MalformedMaskedMarker {
-            element: element.id.clone(),
-        });
-    }
     let from_an_absolute_path = |span: &&SourceSpan| is_absolute_path(&span.file);
     if let Some(span) = element.provenance.source.iter().find(from_an_absolute_path) {
         return Err(RecordRefusal::AbsoluteSourcePath {
@@ -270,11 +265,14 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
                 depth,
             });
         }
-        if mask::has_malformed_marker(&reason.because) {
-            return Err(RecordRefusal::MalformedMaskedMarker {
-                element: element.id.clone(),
-            });
-        }
+    }
+    let reasons = element.reasons.iter().filter_map(Reason::misplaced_marker);
+    let misplaced = element.masked.misplaced_in(&element.payload);
+    if let Some(place) = misplaced.into_iter().chain(reasons).next() {
+        return Err(RecordRefusal::MisplacedMaskedMarker {
+            element: element.id.clone(),
+            place: place.to_owned(),
+        });
     }
     Ok(())
 }
@@ -343,12 +341,14 @@ pub enum RecordRefusal {
         /// The source file as named.
         file: String,
     },
-    /// The payload or a reason of an element has an object that is named as
-    /// a masked marker and holds something else, which could be what the
-    /// marker stands for.
-    MalformedMaskedMarker {
+    /// A masked marker of an element, or of one of its reasons, names a
+    /// place where no value was masked: there is no such place, or a value
+    /// is there.
+    MisplacedMaskedMarker {
         /// The element.
         element: StableId,
+        /// The place the marker names.
+        place: String,
     },
     /// Two elements of the record have one stable identifier.
     DuplicateElement {
@@ -394,11 +394,10 @@ impl fmt::Display for RecordRefusal {
                 "the element `{element}` comes from the source file `{file}`, named by an \
                  absolute path, which a record never holds"
             ),
-            Self::MalformedMaskedMarker { element } => write!(
+            Self::MisplacedMaskedMarker { element, place } => write!(
                 f,
-                "the element `{element}` holds an object with `{}` that is not a masked marker: \
-                 a masked marker holds nothing else",
-                mask::MASKED
+                "the element `{element}` has a masked marker at `{place}`, where no value was \
+                 masked"
             ),
             Self::DuplicateElement { element } => {
                 write!(f, "two elements have the stable identifier `{element}`")

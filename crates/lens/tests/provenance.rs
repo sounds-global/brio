@@ -12,7 +12,7 @@ use brio_lens::{
 
 use support::{
     Forge, Loose, Probe, assert_forgeries_are_corrupted, build_directory, envelopes, files_under,
-    inputs, nested, probe, resealed, stage, workspace,
+    inputs, nested, probe, resealed, stage, workspace, write_record,
 };
 
 /// The source of the module `app::main`.
@@ -29,7 +29,7 @@ fn write<P: Payload>(test: &str, payload: &P) -> Stage<P> {
 fn write_for<P: Payload>(test: &str, module: &str, payload: &P) -> Stage<P> {
     let stage = stage::<P>(module);
     RecordWriter::in_build_directory(build_directory(test))
-        .write(&stage, &inputs(SOURCE), payload)
+        .write(&stage, || inputs(SOURCE), payload)
         .expect("the record is written");
     stage
 }
@@ -75,7 +75,7 @@ fn a_source_file_named_by_an_absolute_path_is_not_written() {
     let error = RecordWriter::in_build_directory(workspace.join(".brio"))
         .write(
             &stage,
-            &inputs(SOURCE),
+            || inputs(SOURCE),
             &Loose(|stage| {
                 vec![
                     Element::new(stage.id(&["sensor", "b"]), json!("b")).from_source(SourceSpan {
@@ -301,18 +301,14 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
     let writer = RecordWriter::in_build_directory(workspace.join(".brio"));
     assert_eq!(Reason::MAX_DEPTH, 122);
 
-    let path = writer
-        .write(
-            &stage,
-            &inputs(SOURCE),
-            &Loose(|stage| {
-                vec![
-                    Element::new(stage.id(&["a"]), json!(1)).because(Reason::new("a", nested(122))),
-                ]
-            }),
-        )
-        .expect("the deepest reason is written")
-        .expect("Lens is on");
+    let path = write_record(
+        workspace.join(".brio"),
+        &stage,
+        &inputs(SOURCE),
+        &Loose(|stage| {
+            vec![Element::new(stage.id(&["a"]), json!(1)).because(Reason::new("a", nested(122)))]
+        }),
+    );
     let envelopes = envelopes("reason_nesting");
     let read = stage.link(&["a"]).resolve(&envelopes).expect("it is found");
     assert_eq!(read.reasons()[0].because, nested(122));
@@ -320,7 +316,7 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
     let error = writer
         .write(
             &stage,
-            &inputs(SOURCE),
+            || inputs(SOURCE),
             &Loose(|stage| {
                 vec![
                     Element::new(stage.id(&["a"]), json!(1)).because(Reason::new("a", nested(123))),
@@ -361,14 +357,12 @@ fn with_provenance_and_a_reason(stage: &Stage<Loose>) -> Vec<Element> {
 fn a_record_whose_provenance_the_writer_would_refuse_is_rejected_even_with_a_matching_digest() {
     let workspace = workspace("provenance_forged");
     let stage = stage::<Loose>("app::main");
-    let path = RecordWriter::in_build_directory(workspace.join(".brio"))
-        .write(
-            &stage,
-            &inputs(SOURCE),
-            &Loose(with_provenance_and_a_reason),
-        )
-        .expect("the record is written")
-        .expect("Lens is on");
+    let path = write_record(
+        workspace.join(".brio"),
+        &stage,
+        &inputs(SOURCE),
+        &Loose(with_provenance_and_a_reason),
+    );
     let text = std::fs::read_to_string(&path).expect("the record can be read");
     let whole: Value = json::from_str(&text).expect("the record is JSON");
     assert_eq!(resealed(whole.clone()), text);
