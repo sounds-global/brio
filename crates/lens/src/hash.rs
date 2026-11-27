@@ -2,11 +2,9 @@
 
 //! Hashing for record keys, stable identifiers and record digests.
 
-use sha2::{Digest, Sha256};
-
-/// The SHA-256 of `bytes`.
-pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
+/// The BLAKE3 of `bytes`.
+pub(crate) fn of(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
 }
 
 /// `bytes` in lowercase hexadecimal.
@@ -21,17 +19,17 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     text
 }
 
-/// A SHA-256 over a sequence of fields.
+/// A BLAKE3 over a sequence of fields.
 ///
 /// Every field is written with its length, so two different sequences never
 /// hash the same bytes.
-pub(crate) struct FieldHasher(Sha256);
+pub(crate) struct FieldHasher(blake3::Hasher);
 
 impl FieldHasher {
     /// A hasher for one purpose. Hashes for different purposes never
     /// collide, because each starts with its own `purpose`.
     pub(crate) fn new(purpose: &str) -> Self {
-        let mut hasher = Self(Sha256::new());
+        let mut hasher = Self(blake3::Hasher::new());
         hasher.text(purpose);
         hasher
     }
@@ -49,7 +47,7 @@ impl FieldHasher {
 
     /// Adds a number, such as a version.
     pub(crate) fn number(&mut self, number: u64) {
-        self.0.update(number.to_le_bytes());
+        self.0.update(&number.to_le_bytes());
     }
 
     /// Adds how many fields of a list follow.
@@ -59,6 +57,6 @@ impl FieldHasher {
 
     /// The hash of every field added.
     pub(crate) fn finish(self) -> [u8; 32] {
-        self.0.finalize().into()
+        *self.0.finalize().as_bytes()
     }
 }

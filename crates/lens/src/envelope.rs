@@ -158,11 +158,11 @@ pub(crate) enum Unreadable {
     },
 }
 
-/// The digest of a record: the SHA-256, in lowercase hexadecimal, of the
+/// The digest of a record: the BLAKE3, in lowercase hexadecimal, of the
 /// canonical JSON text of all its fields except the digest.
 fn digest_of(record_without_digest: Map<String, Value>) -> String {
     let text = canonical::to_text(Value::Object(record_without_digest));
-    hash::hex(&hash::sha256(text.as_bytes()))
+    hash::hex(&hash::of(text.as_bytes()))
 }
 
 /// The JSON Schema of what every record shares.
@@ -170,12 +170,12 @@ pub(crate) fn schema() -> Value {
     let hash = json!({ "type": "string", "pattern": "^[0-9a-f]{64}$" });
     let mut key = hash.clone();
     key["description"] = Value::from(
-        "The record key: the SHA-256 of every input of the record. A record is stored under \
+        "The record key: the BLAKE3 of every input of the record. A record is stored under \
          its key.",
     );
     let mut digest = hash;
     digest["description"] = Value::from(
-        "The SHA-256 of this record without this field, as JSON text with sorted keys, an \
+        "The BLAKE3 of this record without this field, as JSON text with sorted keys, an \
          indent of two spaces and a final newline.",
     );
 

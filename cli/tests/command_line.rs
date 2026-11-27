@@ -9,7 +9,7 @@ const ENVELOPE_SCHEMA: &str = r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "digest": {
-      "description": "The SHA-256 of this record without this field, as JSON text with sorted keys, an indent of two spaces and a final newline.",
+      "description": "The BLAKE3 of this record without this field, as JSON text with sorted keys, an indent of two spaces and a final newline.",
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
@@ -17,7 +17,7 @@ const ENVELOPE_SCHEMA: &str = r#"{
       "const": 1
     },
     "key": {
-      "description": "The record key: the SHA-256 of every input of the record. A record is stored under its key.",
+      "description": "The record key: the BLAKE3 of every input of the record. A record is stored under its key.",
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
