@@ -3,123 +3,50 @@
 //! Writing and reading stage records, through the public interface of
 //! `brio_lens`.
 
-use std::collections::BTreeMap;
+mod support;
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use brio_lens::json::{Value, json};
 use brio_lens::{
-    Envelope, InvalidPayloadKind, Payload, ReadError, RecordDefect, RecordInputs, RecordReader,
-    RecordRefusal, RecordWriter, StableId, WriteError,
+    Element, ElementTable, Envelope, InvalidPayloadKind, Payload, PayloadType, ReadError,
+    RecordDefect, RecordReader, RecordRefusal, RecordWriter, Stage, WriteError,
 };
 
-/// A payload no phase owns: the reading of every sensor a module declares.
-#[derive(Debug, PartialEq)]
-struct Probe {
-    readings: Vec<Reading>,
-}
-
-/// One element of a [`Probe`].
-#[derive(Debug, PartialEq)]
-struct Reading {
-    id: StableId,
-    sensor: String,
-    value: i64,
-}
-
-impl Payload for Probe {
-    const KIND: &'static str = "probe";
-    const VERSION: u32 = 3;
-
-    fn schema_fragment() -> Value {
-        json!({ "type": "object" })
-    }
-
-    fn to_json(&self) -> Value {
-        let readings: Vec<Value> = self
-            .readings
-            .iter()
-            .map(|reading| {
-                json!({
-                    "id": reading.id.to_json(),
-                    "sensor": reading.sensor,
-                    "value": reading.value
-                })
-            })
-            .collect();
-        json!({ "readings": readings })
-    }
-
-    fn from_json(payload: &Value) -> Option<Self> {
-        let readings = payload["readings"]
-            .as_array()?
-            .iter()
-            .map(|reading| {
-                Some(Reading {
-                    id: StableId::from_json(&reading["id"])?,
-                    sensor: reading["sensor"].as_str()?.to_owned(),
-                    value: reading["value"].as_i64()?,
-                })
-            })
-            .collect::<Option<Vec<Reading>>>()?;
-        Some(Self { readings })
-    }
-}
-
-/// What the probe stage produces for `module` when it declares `sensors`.
-///
-/// A reading's place in the stage's structure is its sensor's name.
-fn probe(module: &str, sensors: &[(&str, i64)]) -> Probe {
-    let readings = sensors
-        .iter()
-        .map(|(sensor, value)| Reading {
-            id: StableId::of::<Probe>(module, &["sensor", sensor]).expect("`probe` is a kind"),
-            sensor: (*sensor).to_owned(),
-            value: *value,
-        })
-        .collect();
-    Probe { readings }
-}
-
-/// A second payload type, which a reader of [`Probe`] records does not expect.
-#[derive(Debug, PartialEq)]
-struct Gauge(String);
-
-impl Payload for Gauge {
-    const KIND: &'static str = "gauge";
-    const VERSION: u32 = 1;
-
-    fn schema_fragment() -> Value {
-        json!({ "type": "string" })
-    }
-
-    fn to_json(&self) -> Value {
-        Value::from(self.0.as_str())
-    }
-
-    fn from_json(payload: &Value) -> Option<Self> {
-        Some(Self(payload.as_str()?.to_owned()))
-    }
-}
+use support::{
+    Forge, Gauge, Loose, Probe, assert_forgeries_are_corrupted, envelopes, files_under, inputs,
+    nested, probe, resealed, stage, tamper, with_its_own_digest, workspace,
+};
 
 /// A payload of numbers that are not whole.
 #[derive(Debug, PartialEq)]
 struct Levels(Vec<f64>);
 
-impl Payload for Levels {
+impl PayloadType for Levels {
     const KIND: &'static str = "levels";
     const VERSION: u32 = 1;
 
     fn schema_fragment() -> Value {
         json!({ "type": "array", "items": { "type": "number" } })
     }
+}
 
-    fn to_json(&self) -> Value {
-        Value::from(self.0.clone())
+impl Payload for Levels {
+    fn to_elements(&self, stage: &Stage<Self>) -> Vec<Element> {
+        vec![Element::new(
+            stage.id(&["levels"]),
+            Value::from(self.0.clone()),
+        )]
     }
 
-    fn from_json(payload: &Value) -> Option<Self> {
-        payload
+    fn from_elements(elements: &ElementTable) -> Option<Self> {
+        let [root] = elements.roots() else {
+            return None;
+        };
+        elements
+            .get(root)?
+            .payload()
             .as_array()?
             .iter()
             .map(Value::as_f64)
@@ -128,61 +55,18 @@ impl Payload for Levels {
     }
 }
 
-/// The inputs of the module `app::main` when its source is `source`.
-fn inputs(source: &str) -> RecordInputs {
-    RecordInputs {
-        module: "app::main".to_owned(),
-        module_inputs: BTreeMap::from([("source".to_owned(), source.as_bytes().to_vec())]),
-        toolchain_version: "0.1.0".to_owned(),
-        target: "aarch64-unknown-linux-gnu".to_owned(),
-        build_settings: BTreeMap::from([("profile".to_owned(), "dev".to_owned())]),
-    }
-}
-
-/// An empty workspace for the test called `test`.
-fn workspace(test: &str) -> PathBuf {
-    let workspace = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("records")
-        .join(test);
-    if workspace.exists() {
-        fs::remove_dir_all(&workspace).expect("the old workspace can be removed");
-    }
-    fs::create_dir_all(&workspace).expect("the workspace can be created");
-    workspace
-}
-
-/// Every file under `directory`, at any depth.
-fn files_under(directory: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(directory).expect("the directory can be listed") {
-        let path = entry.expect("the entry can be read").path();
-        if path.is_dir() {
-            files.extend(files_under(&path));
-        } else {
-            files.push(path);
-        }
-    }
-    files
-}
-
-/// Changes the one written record at `path` by replacing `from` with `to`.
-fn tamper(path: &Path, from: &str, to: &str) {
-    let text = fs::read_to_string(path).expect("the record can be read");
-    assert!(text.contains(from), "the record has `{from}`:\n{text}");
-    fs::write(path, text.replacen(from, to, 1)).expect("the record can be changed");
-}
-
 #[test]
 fn writing_then_reading_a_record_gives_back_the_same_envelope_and_payload() {
     let build_directory = workspace("round_trip").join(".brio");
+    let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\nsensor b\n");
-    let written = probe("app::main", &[("a", 7), ("b", -2)]);
+    let written = probe(&[("a", 7), ("b", -2)]);
 
     RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs, &written)
+        .write(&stage, &inputs, &written)
         .expect("the record is written");
     let record = RecordReader::in_build_directory(&build_directory)
-        .read::<Probe>(&inputs)
+        .read(&stage, &inputs)
         .expect("the record is read");
 
     assert_eq!(record.payload, written);
@@ -194,6 +78,7 @@ fn writing_then_reading_a_record_gives_back_the_same_envelope_and_payload() {
 #[test]
 fn numbers_that_are_not_whole_read_back_exactly() {
     let build_directory = workspace("numbers").join(".brio");
+    let stage = stage::<Levels>("app::main");
     let inputs = inputs("sensor a\n");
     // Numbers that a JSON reader without exact rounding gets wrong.
     let written = Levels(vec![
@@ -217,10 +102,10 @@ fn numbers_that_are_not_whole_read_back_exactly() {
     ]);
 
     RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs, &written)
+        .write(&stage, &inputs, &written)
         .expect("the record is written");
     let record = RecordReader::in_build_directory(&build_directory)
-        .read::<Levels>(&inputs)
+        .read(&stage, &inputs)
         .expect("the record is read");
 
     assert_eq!(record.payload, written);
@@ -229,12 +114,13 @@ fn numbers_that_are_not_whole_read_back_exactly() {
 #[test]
 fn writers_of_the_same_record_at_the_same_time_all_succeed() {
     let build_directory = workspace("same_time").join(".brio");
+    let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\n");
 
     let write_often = || {
         for _ in 0..50 {
             RecordWriter::in_build_directory(&build_directory)
-                .write(&inputs, &probe("app::main", &[("a", 7)]))
+                .write(&stage, &inputs, &probe(&[("a", 7)]))
                 .expect("the record is written");
         }
     };
@@ -246,7 +132,7 @@ fn writers_of_the_same_record_at_the_same_time_all_succeed() {
 
     assert_eq!(files_under(&build_directory).len(), 1);
     RecordReader::in_build_directory(&build_directory)
-        .read::<Probe>(&inputs)
+        .read(&stage, &inputs)
         .expect("the record is read");
 }
 
@@ -255,7 +141,11 @@ fn identical_input_gives_byte_identical_records() {
     let write = |test: &str| {
         let build_directory = workspace(test).join(".brio");
         let path = RecordWriter::in_build_directory(&build_directory)
-            .write(&inputs("sensor a\n"), &probe("app::main", &[("a", 7)]))
+            .write(
+                &stage::<Probe>("app::main"),
+                &inputs("sensor a\n"),
+                &probe(&[("a", 7)]),
+            )
             .expect("the record is written");
         let relative = path
             .strip_prefix(&build_directory)
@@ -274,27 +164,25 @@ fn identical_input_gives_byte_identical_records() {
 
 #[test]
 fn an_unrelated_change_elsewhere_does_not_change_an_elements_stable_identifier() {
-    let before = probe("app::main", &[("b", 7)]);
-    let after = probe("app::main", &[("a", 1), ("b", 7), ("c", 3)]);
+    let stage = stage::<Probe>("app::main");
+    let before = probe(&[("b", 7)]).to_elements(&stage);
+    let after = probe(&[("a", 1), ("b", 7), ("c", 3)]).to_elements(&stage);
 
-    assert_eq!(before.readings[0].sensor, "b");
-    assert_eq!(after.readings[1].sensor, "b");
-    assert_eq!(before.readings[0].id, after.readings[1].id);
+    assert_eq!(before[0].payload()["sensor"], "b");
+    assert_eq!(after[1].payload()["sensor"], "b");
+    assert_eq!(before[0].id(), after[1].id());
 }
 
 #[test]
 fn a_stable_identifier_differs_by_module_by_stage_and_by_place() {
-    let id = StableId::of::<Probe>("app::main", &["sensor", "a"]).expect("`probe` is a kind");
+    let id = stage::<Probe>("app::main").id(&["sensor", "a"]);
 
-    let other_module = StableId::of::<Probe>("app::util", &["sensor", "a"]);
-    let other_stage = StableId::of::<Gauge>("app::main", &["sensor", "a"]);
-    let other_place = StableId::of::<Probe>("app::main", &["sensor", "b"]);
-    let split_place = StableId::of::<Probe>("app::main", &["sensora"]);
-
-    assert_ne!(Ok(&id), other_module.as_ref());
-    assert_ne!(Ok(&id), other_stage.as_ref());
-    assert_ne!(Ok(&id), other_place.as_ref());
-    assert_ne!(Ok(&id), split_place.as_ref());
+    assert_eq!(id.to_string().len(), 32);
+    assert_eq!(id, stage::<Probe>("app::main").id(&["sensor", "a"]));
+    assert_ne!(id, stage::<Probe>("app::util").id(&["sensor", "a"]));
+    assert_ne!(id, stage::<Gauge>("app::main").id(&["sensor", "a"]));
+    assert_ne!(id, stage::<Probe>("app::main").id(&["sensor", "b"]));
+    assert_ne!(id, stage::<Probe>("app::main").id(&["sensora"]));
 }
 
 #[test]
@@ -303,7 +191,11 @@ fn records_are_written_under_the_build_directory_and_nowhere_else() {
     let build_directory = workspace.join(".brio");
 
     let path = RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs("sensor a\n"), &probe("app::main", &[("a", 7)]))
+        .write(
+            &stage::<Probe>("app::main"),
+            &inputs("sensor a\n"),
+            &probe(&[("a", 7)]),
+        )
         .expect("the record is written");
 
     assert!(path.starts_with(&build_directory));
@@ -313,9 +205,9 @@ fn records_are_written_under_the_build_directory_and_nowhere_else() {
 #[test]
 fn a_record_with_an_unknown_payload_type_reads_as_an_untyped_payload() {
     let build_directory = workspace("untyped").join(".brio");
-    let inputs = inputs("sensor a\n");
+    let stage = stage::<Gauge>("app::main");
     RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs, &Gauge("steady".to_owned()))
+        .write(&stage, &inputs("sensor a\n"), &Gauge("steady".to_owned()))
         .expect("the record is written");
     let reader = RecordReader::in_build_directory(&build_directory);
 
@@ -326,7 +218,14 @@ fn a_record_with_an_unknown_payload_type_reads_as_an_untyped_payload() {
     assert_eq!(record.envelope.module(), "app::main");
     assert_eq!(record.envelope.payload_kind(), "gauge");
     assert_eq!(record.envelope.payload_version(), 1);
-    assert_eq!(record.payload, json!("steady"));
+    // The reader knows no payload type, and still finds the element by its
+    // stable identifier.
+    let element = record
+        .envelope
+        .elements()
+        .get(&stage.id(&["gauge"]))
+        .expect("the element is in the record");
+    assert_eq!(element.payload(), &json!("steady"));
 
     let as_probe = record.clone().typed::<Probe>();
     assert!(matches!(as_probe, Err(ReadError::WrongPayload { .. })));
@@ -340,14 +239,15 @@ fn a_record_with_an_unknown_payload_type_reads_as_an_untyped_payload() {
 #[test]
 fn a_corrupted_record_is_rejected_not_trusted() {
     let build_directory = workspace("corrupted").join(".brio");
+    let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .write(&stage, &inputs, &probe(&[("a", 7)]))
         .expect("the record is written");
     let reader = RecordReader::in_build_directory(&build_directory);
 
     tamper(&path, r#""value": 7"#, r#""value": 8"#);
-    let changed = reader.read::<Probe>(&inputs);
+    let changed = reader.read(&stage, &inputs);
     assert!(matches!(
         changed,
         Err(ReadError::Defective {
@@ -366,10 +266,10 @@ fn a_corrupted_record_is_rejected_not_trusted() {
 
     tamper(&path, r#""value": 8"#, r#""value": 7"#);
     reader
-        .read::<Probe>(&inputs)
+        .read(&stage, &inputs)
         .expect("the record is whole again");
     tamper(&path, r#""value": 7"#, r#""value":  7"#);
-    let respaced = reader.read::<Probe>(&inputs);
+    let respaced = reader.read(&stage, &inputs);
     assert!(matches!(
         respaced,
         Err(ReadError::Defective {
@@ -379,7 +279,7 @@ fn a_corrupted_record_is_rejected_not_trusted() {
     ));
 
     fs::write(&path, "{ \"envelope_version\": 1,").expect("the record can be cut short");
-    let cut_short = reader.read::<Probe>(&inputs);
+    let cut_short = reader.read(&stage, &inputs);
     assert!(matches!(
         cut_short,
         Err(ReadError::Defective {
@@ -392,9 +292,10 @@ fn a_corrupted_record_is_rejected_not_trusted() {
 #[test]
 fn an_unsupported_envelope_version_is_rejected_naming_the_found_and_supported_versions() {
     let build_directory = workspace("envelope_version").join(".brio");
+    let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .write(&stage, &inputs, &probe(&[("a", 7)]))
         .expect("the record is written");
 
     assert_eq!(Envelope::VERSION, 1);
@@ -404,7 +305,7 @@ fn an_unsupported_envelope_version_is_rejected_naming_the_found_and_supported_ve
         r#""envelope_version": 2"#,
     );
     let error = RecordReader::in_build_directory(&build_directory)
-        .read::<Probe>(&inputs)
+        .read(&stage, &inputs)
         .expect_err("envelope version 2 is not supported");
 
     assert!(matches!(
@@ -429,21 +330,20 @@ fn an_unsupported_envelope_version_is_rejected_naming_the_found_and_supported_ve
 #[test]
 fn a_change_to_any_input_gives_another_record_key() {
     let build_directory = workspace("key").join(".brio");
+    let stage = stage::<Probe>("app::main");
     let original = inputs("sensor a\n");
     RecordWriter::in_build_directory(&build_directory)
-        .write(&original, &probe("app::main", &[("a", 7)]))
+        .write(&stage, &original, &probe(&[("a", 7)]))
         .expect("the record is written");
     let reader = RecordReader::in_build_directory(&build_directory);
     let key = reader
-        .read::<Probe>(&original)
+        .read(&stage, &original)
         .expect("the record is read")
         .envelope
         .key()
         .clone();
     assert_eq!(key.to_string().len(), 64);
 
-    let mut other_module = original.clone();
-    other_module.module = "app::util".to_owned();
     let mut other_toolchain = original.clone();
     other_toolchain.toolchain_version = "0.2.0".to_owned();
     let mut other_target = original.clone();
@@ -459,44 +359,38 @@ fn a_change_to_any_input_gives_another_record_key() {
 
     for changed in [
         inputs("sensor a\nsensor b\n"),
-        other_module,
         other_toolchain,
         other_target,
         other_settings,
         other_interface,
     ] {
-        let read = reader.read::<Probe>(&changed);
+        let read = reader.read(&stage, &changed);
         assert!(
             matches!(read, Err(ReadError::Missing { .. })),
             "{changed:?} still finds the record"
         );
     }
-    // The stage is an input too: the same inputs give another stage another record.
+    // The module and the stage are inputs too: the same inputs give another
+    // module, or another stage, another record.
     assert!(matches!(
-        reader.read::<Gauge>(&original),
+        reader.read(&support::stage::<Probe>("app::util"), &original),
         Err(ReadError::Missing { .. })
     ));
-}
-
-/// The record `text` with the digest the published schema describes: the
-/// BLAKE3 of the record without its digest field. Worked out here, without
-/// Lens, as any tool outside the toolchain would.
-fn with_its_own_digest(text: &str) -> String {
-    let (digest_line, rest) = text
-        .strip_prefix("{\n")
-        .and_then(|fields| fields.split_once('\n'))
-        .expect("the digest is the first field of a record");
-    assert!(digest_line.starts_with(r#"  "digest": ""#), "{digest_line}");
-    let without_digest = format!("{{\n{rest}");
-    let digest = blake3::hash(without_digest.as_bytes()).to_hex();
-    format!("{{\n  \"digest\": \"{digest}\",\n{rest}")
+    assert!(matches!(
+        reader.read(&support::stage::<Gauge>("app::main"), &original),
+        Err(ReadError::Missing { .. })
+    ));
 }
 
 #[test]
 fn the_digest_of_a_record_is_the_one_the_published_schema_describes() {
     let build_directory = workspace("digest").join(".brio");
     let path = RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs("sensor a\n"), &probe("app::main", &[("a", 7)]))
+        .write(
+            &stage::<Probe>("app::main"),
+            &inputs("sensor a\n"),
+            &probe(&[("a", 7)]),
+        )
         .expect("the record is written");
 
     let text = fs::read_to_string(path).expect("the record can be read");
@@ -507,9 +401,10 @@ fn the_digest_of_a_record_is_the_one_the_published_schema_describes() {
 #[test]
 fn a_record_the_writer_would_refuse_is_rejected_even_with_a_matching_digest() {
     let build_directory = workspace("forged").join(".brio");
+    let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\n");
     let path = RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .write(&stage, &inputs, &probe(&[("a", 7)]))
         .expect("the record is written");
     let reader = RecordReader::in_build_directory(&build_directory);
     let text = fs::read_to_string(&path).expect("the record can be read");
@@ -519,42 +414,53 @@ fn a_record_the_writer_would_refuse_is_rejected_even_with_a_matching_digest() {
     // record to its inputs.
     let revalued = with_its_own_digest(&text.replacen(r#""value": 7"#, r#""value": 8"#, 1));
     fs::write(&path, revalued).expect("the record can be changed");
-    let record = reader.read::<Probe>(&inputs).expect("the digest matches");
-    assert_eq!(record.payload.readings[0].value, 8);
+    let record = reader.read(&stage, &inputs).expect("the digest matches");
+    assert_eq!(record.payload, probe(&[("a", 8)]));
 
-    let renamed = with_its_own_digest(&text.replacen(
-        r#""module": "app::main""#,
-        r#""module": "/home/ada/app/main.brio""#,
-        1,
-    ));
-    assert_ne!(renamed, text);
-    fs::write(&path, renamed).expect("the record can be changed");
-    let read = reader.read::<Probe>(&inputs);
-    assert!(matches!(
-        read,
-        Err(ReadError::Defective {
-            defect: RecordDefect::Corrupted,
-            ..
-        })
-    ));
+    for (from, to) in [
+        (
+            r#""module": "app::main""#,
+            r#""module": "/home/ada/app/main.brio""#,
+        ),
+        (
+            r#""payload_kind": "probe""#,
+            r#""payload_kind": "probe.3+gauge""#,
+        ),
+    ] {
+        let forged = with_its_own_digest(&text.replacen(from, to, 1));
+        assert_ne!(forged, text);
+        fs::write(&path, forged).expect("the record can be changed");
+        let read = reader.read(&stage, &inputs);
+        assert!(
+            matches!(
+                read,
+                Err(ReadError::Defective {
+                    defect: RecordDefect::Corrupted,
+                    ..
+                })
+            ),
+            "{to} is read"
+        );
+    }
 }
 
 #[test]
 fn a_stale_record_is_rejected_not_trusted() {
     let build_directory = workspace("stale").join(".brio");
     let writer = RecordWriter::in_build_directory(&build_directory);
+    let stage = stage::<Probe>("app::main");
     let old_inputs = inputs("sensor a\n");
     let new_inputs = inputs("sensor a\nsensor b\n");
     let old_path = writer
-        .write(&old_inputs, &probe("app::main", &[("a", 7)]))
+        .write(&stage, &old_inputs, &probe(&[("a", 7)]))
         .expect("the old record is written");
     let new_path = writer
-        .write(&new_inputs, &probe("app::main", &[("a", 7), ("b", 1)]))
+        .write(&stage, &new_inputs, &probe(&[("a", 7), ("b", 1)]))
         .expect("the new record is written");
 
     // The record of the old inputs now sits where the new inputs' record belongs.
     fs::copy(&old_path, &new_path).expect("the old record can be copied");
-    let read = RecordReader::in_build_directory(&build_directory).read::<Probe>(&new_inputs);
+    let read = RecordReader::in_build_directory(&build_directory).read(&stage, &new_inputs);
 
     assert!(matches!(
         read,
@@ -571,10 +477,14 @@ fn a_record_that_cannot_be_read_hides_no_other_record() {
     let writer = RecordWriter::in_build_directory(&build_directory);
     let inputs = inputs("sensor a\n");
     writer
-        .write(&inputs, &Gauge("steady".to_owned()))
+        .write(
+            &stage::<Gauge>("app::main"),
+            &inputs,
+            &Gauge("steady".to_owned()),
+        )
         .expect("the gauge record is written");
     let probe_path = writer
-        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .write(&stage::<Probe>("app::main"), &inputs, &probe(&[("a", 7)]))
         .expect("the probe record is written");
     tamper(&probe_path, r#""value": 7"#, r#""value": 8"#);
     fs::write(build_directory.join("lens").join("notes.json"), "{}\n")
@@ -605,24 +515,30 @@ fn a_record_that_cannot_be_read_hides_no_other_record() {
     assert_eq!(corrupted, 2);
 }
 
-/// A payload of arrays nested inside each other, and nothing else.
+/// A payload of one element, whose payload is arrays nested inside each
+/// other and nothing else.
 struct Nest(usize);
 
-impl Payload for Nest {
+impl PayloadType for Nest {
     const KIND: &'static str = "nest";
     const VERSION: u32 = 1;
 
     fn schema_fragment() -> Value {
         json!({ "type": "array" })
     }
+}
 
-    fn to_json(&self) -> Value {
-        (0..self.0).fold(Value::Null, |inner, _| json!([inner]))
+impl Payload for Nest {
+    fn to_elements(&self, stage: &Stage<Self>) -> Vec<Element> {
+        vec![Element::new(stage.id(&["nest"]), nested(self.0))]
     }
 
-    fn from_json(payload: &Value) -> Option<Self> {
+    fn from_elements(elements: &ElementTable) -> Option<Self> {
+        let [root] = elements.roots() else {
+            return None;
+        };
         let mut depth = 0;
-        let mut inner = payload;
+        let mut inner = elements.get(root)?.payload();
         while let Some(items) = inner.as_array() {
             depth += 1;
             inner = items.first()?;
@@ -632,44 +548,42 @@ impl Payload for Nest {
 }
 
 #[test]
-fn a_payload_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
+fn an_elements_payload_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
     let workspace = workspace("nesting");
     let build_directory = workspace.join(".brio");
     let writer = RecordWriter::in_build_directory(&build_directory);
+    let stage = stage::<Nest>("app::main");
     let inputs = inputs("sensor a\n");
-    assert_eq!(Envelope::MAX_PAYLOAD_DEPTH, 126);
+    assert_eq!(Envelope::MAX_PAYLOAD_DEPTH, 124);
 
     let path = writer
-        .write(&inputs, &Nest(126))
+        .write(&stage, &inputs, &Nest(124))
         .expect("the deepest payload is written");
     let record = RecordReader::in_build_directory(&build_directory)
-        .read::<Nest>(&inputs)
+        .read(&stage, &inputs)
         .expect("the deepest payload is read");
-    assert_eq!(record.payload.0, 126);
+    assert_eq!(record.payload.0, 124);
 
     let error = writer
-        .write(&inputs, &Nest(127))
+        .write(&stage, &inputs, &Nest(125))
         .expect_err("no reader could read this payload back");
+    let nest = stage.id(&["nest"]);
     assert!(matches!(
-        error,
-        WriteError::Refused(RecordRefusal::PayloadTooDeep {
-            payload_kind: "nest",
-            depth: 127
-        })
+        &error,
+        WriteError::Refused(RecordRefusal::PayloadTooDeep { element, depth: 125 }) if *element == nest
     ));
     assert_eq!(
         error.to_string(),
-        "the `nest` payload nests 127 deep, but a record holds at most 126 levels"
+        format!(
+            "the payload of the element `{nest}` nests 125 deep, but an element's payload nests \
+             at most 124 levels"
+        )
     );
     assert_eq!(files_under(&workspace), [path]);
 }
 
 #[test]
-fn a_module_named_by_an_absolute_path_is_not_written() {
-    let workspace = workspace("absolute_path");
-    let build_directory = workspace.join(".brio");
-    let writer = RecordWriter::in_build_directory(&build_directory);
-
+fn a_module_named_by_an_absolute_path_does_not_enter_lens() {
     for module in [
         "/home/ada/app/main.brio",
         "~/app/main.brio",
@@ -677,23 +591,15 @@ fn a_module_named_by_an_absolute_path_is_not_written() {
         "C:/Users/ada/app/main.brio",
         r"\\server\share\main.brio",
     ] {
-        let mut inputs = inputs("sensor a\n");
-        inputs.module = module.to_owned();
-        let error = writer
-            .write(&inputs, &probe(module, &[("a", 7)]))
-            .expect_err("an absolute path is refused");
+        let error = Stage::<Probe>::of(module).expect_err("an absolute path is refused");
         assert!(
-            matches!(&error, WriteError::Refused(RecordRefusal::AbsolutePath { module: refused }) if refused == module),
+            matches!(&error, RecordRefusal::AbsoluteModulePath { module: refused } if refused == module),
             "{module} gives {error}"
         );
     }
-    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
 
-    let mut relative = inputs("sensor a\n");
-    relative.module = "app/main.brio".to_owned();
-    writer
-        .write(&relative, &probe("app/main.brio", &[("a", 7)]))
-        .expect("a path inside the workspace is a name");
+    let relative = Stage::<Probe>::of("app/main.brio").expect("a path in the workspace is a name");
+    assert_eq!(relative.module(), "app/main.brio");
 }
 
 #[cfg(unix)]
@@ -702,62 +608,319 @@ fn a_write_that_fails_leaves_nothing_behind() {
     let workspace = workspace("failed_write");
     let build_directory = workspace.join(".brio");
     let writer = RecordWriter::in_build_directory(&build_directory);
+    let stage = stage::<Probe>("app::main");
     let inputs = inputs("sensor a\n");
     let path = writer
-        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .write(&stage, &inputs, &probe(&[("a", 7)]))
         .expect("the record is written");
     // A directory where the record belongs: nothing can be renamed onto it.
     fs::remove_file(&path).expect("the record can be removed");
     fs::create_dir(&path).expect("a directory can take its place");
 
     let error = writer
-        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .write(&stage, &inputs, &probe(&[("a", 7)]))
         .expect_err("the record cannot be written");
 
     assert!(matches!(error, WriteError::Io { .. }));
     assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
 }
 
-/// A payload whose kind breaks the rule on payload kinds.
+/// A payload type whose kind breaks the rule on payload kinds.
 struct Dotted;
 
-impl Payload for Dotted {
+impl PayloadType for Dotted {
     const KIND: &'static str = "probe.3+gauge";
     const VERSION: u32 = 1;
 
     fn schema_fragment() -> Value {
         json!({ "type": "null" })
     }
+}
 
-    fn to_json(&self) -> Value {
-        Value::Null
-    }
+#[test]
+fn a_payload_type_with_an_invalid_payload_kind_does_not_enter_lens() {
+    let error = Stage::<Dotted>::of("app::main").expect_err("the kind is refused");
 
-    fn from_json(_payload: &Value) -> Option<Self> {
-        Some(Self)
+    assert!(matches!(
+        error,
+        RecordRefusal::InvalidPayloadKind(InvalidPayloadKind {
+            payload_kind: "probe.3+gauge"
+        })
+    ));
+}
+
+/// The elements of a small outline: a document with two sections, the
+/// second of which has one of its own.
+fn outline(stage: &Stage<Loose>) -> Vec<Element> {
+    let document = stage.id(&["document"]);
+    let usage = stage.id(&["document", "usage"]);
+    vec![
+        Element::new(document.clone(), json!("Document")),
+        Element::new(stage.id(&["document", "install"]), json!("Install")).child_of(&document),
+        Element::new(usage.clone(), json!("Usage")).child_of(&document),
+        Element::new(stage.id(&["document", "usage", "flags"]), json!("Flags")).child_of(&usage),
+        Element::new(stage.id(&["appendix"]), json!("Appendix")),
+    ]
+}
+
+#[test]
+fn an_element_names_its_parent_and_lists_its_children_in_order() {
+    let build_directory = workspace("outline").join(".brio");
+    let stage = stage::<Loose>("app::main");
+    RecordWriter::in_build_directory(&build_directory)
+        .write(&stage, &inputs("sensor a\n"), &Loose(outline))
+        .expect("the record is written");
+
+    let envelopes = envelopes("outline");
+    let elements = envelopes[0].elements();
+
+    let document = stage.id(&["document"]);
+    let install = stage.id(&["document", "install"]);
+    let usage = stage.id(&["document", "usage"]);
+    let flags = stage.id(&["document", "usage", "flags"]);
+    let appendix = stage.id(&["appendix"]);
+    assert_eq!(elements.len(), 5);
+    assert_eq!(elements.roots(), [document.clone(), appendix.clone()]);
+    let element = |id| elements.get(id).expect("the element is in the record");
+    assert_eq!(element(&document).parent(), None);
+    assert_eq!(
+        element(&document).children(),
+        [install.clone(), usage.clone()]
+    );
+    assert_eq!(element(&install).parent(), Some(&document));
+    assert_eq!(element(&install).children(), []);
+    assert_eq!(element(&usage).children(), std::slice::from_ref(&flags));
+    assert_eq!(element(&flags).parent(), Some(&usage));
+    assert_eq!(element(&flags).payload(), &json!("Flags"));
+    assert_eq!(element(&appendix).children(), []);
+
+    // Each parent before its children, in their order.
+    let in_order: Vec<&Value> = elements.in_order().map(Element::payload).collect();
+    assert_eq!(
+        in_order,
+        ["Document", "Install", "Usage", "Flags", "Appendix"]
+    );
+}
+
+#[test]
+fn a_record_of_another_module_under_the_right_record_key_is_rejected() {
+    let build_directory = workspace("forged_module").join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = RecordWriter::in_build_directory(&build_directory)
+        .write(&stage, &inputs, &probe(&[("a", 7)]))
+        .expect("the record is written");
+    let text = fs::read_to_string(&path).expect("the record can be read");
+
+    // A whole record, with a digest to match, that says it is for another
+    // module than the one its record key was computed for.
+    let renamed = with_its_own_digest(&text.replacen(
+        r#""module": "app::main""#,
+        r#""module": "app::util""#,
+        1,
+    ));
+    fs::write(&path, renamed).expect("the record can be changed");
+    let read = RecordReader::in_build_directory(&build_directory).read(&stage, &inputs);
+
+    assert!(matches!(
+        read,
+        Err(ReadError::Defective {
+            defect: RecordDefect::Corrupted,
+            ..
+        })
+    ));
+}
+
+/// What the writer says when asked to write `elements`.
+fn refusal(test: &str, elements: fn(&Stage<Loose>) -> Vec<Element>) -> RecordRefusal {
+    let workspace = workspace(test);
+    let error = RecordWriter::in_build_directory(workspace.join(".brio"))
+        .write(
+            &stage::<Loose>("app::main"),
+            &inputs("sensor a\n"),
+            &Loose(elements),
+        )
+        .expect_err("the record is refused");
+    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
+    match error {
+        WriteError::Refused(refusal) => refusal,
+        other @ WriteError::Io { .. } => panic!("the write failed: {other}"),
+        other => panic!("the write failed in an unexpected way: {other}"),
     }
 }
 
 #[test]
-fn a_payload_with_an_invalid_payload_kind_is_not_written() {
-    let workspace = workspace("invalid_kind");
-    let build_directory = workspace.join(".brio");
+fn two_elements_with_one_stable_identifier_are_not_written() {
+    let stage = stage::<Loose>("app::main");
+    let twice = stage.id(&["a"]);
 
-    let error = RecordWriter::in_build_directory(&build_directory)
-        .write(&inputs("sensor a\n"), &Dotted)
-        .expect_err("the kind is refused");
+    let refused = refusal("duplicate_element", |stage| {
+        vec![
+            Element::new(stage.id(&["a"]), json!(1)),
+            Element::new(stage.id(&["a"]), json!(2)),
+        ]
+    });
 
-    assert!(matches!(
-        error,
-        WriteError::Refused(RecordRefusal::InvalidPayloadKind(InvalidPayloadKind {
-            payload_kind: "probe.3+gauge"
-        }))
-    ));
-    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
     assert_eq!(
-        StableId::of::<Dotted>("app::main", &["a"]),
-        Err(InvalidPayloadKind {
-            payload_kind: "probe.3+gauge"
-        })
+        refused,
+        RecordRefusal::DuplicateElement {
+            element: twice.clone()
+        }
     );
+    assert_eq!(
+        refused.to_string(),
+        format!("two elements have the stable identifier `{twice}`")
+    );
+}
+
+#[test]
+fn an_element_whose_parent_is_not_in_the_record_is_not_written() {
+    let stage = stage::<Loose>("app::main");
+    let (child, parent) = (stage.id(&["a", "b"]), stage.id(&["a"]));
+
+    let refused = refusal("missing_parent", |stage| {
+        vec![Element::new(stage.id(&["a", "b"]), json!(1)).child_of(&stage.id(&["a"]))]
+    });
+
+    assert_eq!(
+        refused,
+        RecordRefusal::MissingParent {
+            element: child.clone(),
+            parent: parent.clone()
+        }
+    );
+    assert_eq!(
+        refused.to_string(),
+        format!("the element `{child}` names the parent `{parent}`, which is not in the record")
+    );
+}
+
+#[test]
+fn elements_that_are_their_own_ancestors_are_not_written() {
+    let refused = refusal("parent_cycle", |stage| {
+        let (a, b) = (stage.id(&["a"]), stage.id(&["b"]));
+        vec![
+            Element::new(stage.id(&["root"]), json!(0)),
+            Element::new(a.clone(), json!(1)).child_of(&b),
+            Element::new(b, json!(2)).child_of(&a),
+        ]
+    });
+
+    let stage = stage::<Loose>("app::main");
+    let (a, b) = (stage.id(&["a"]), stage.id(&["b"]));
+    let RecordRefusal::ParentCycle { element } = &refused else {
+        panic!("the refusal is {refused}");
+    };
+    assert!(*element == a || *element == b);
+    assert_eq!(
+        refused.to_string(),
+        format!("the element `{element}` is its own ancestor")
+    );
+}
+
+#[test]
+fn a_record_whose_element_table_breaks_its_rules_is_rejected_even_with_a_matching_digest() {
+    let build_directory = workspace("forged_table").join(".brio");
+    let stage = stage::<Loose>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = RecordWriter::in_build_directory(&build_directory)
+        .write(&stage, &inputs, &Loose(outline))
+        .expect("the record is written");
+    let reader = RecordReader::in_build_directory(&build_directory);
+    let text = fs::read_to_string(&path).expect("the record can be read");
+    let whole: Value = brio_lens::json::from_str(&text).expect("the record is JSON");
+    assert_eq!(resealed(whole.clone()), text);
+
+    let document = stage.id(&["document"]).to_string();
+    let usage = stage.id(&["document", "usage"]).to_string();
+    let flags = stage.id(&["document", "usage", "flags"]).to_string();
+    let appendix = stage.id(&["appendix"]).to_string();
+
+    // Another order of the same children is another record, and a whole one.
+    let mut reordered = whole.clone();
+    reordered["roots"] = json!([appendix, document]);
+    fs::write(&path, resealed(reordered)).expect("the record can be changed");
+    let record = reader.read(&stage, &inputs).expect("the table holds");
+    assert_eq!(record.envelope.elements().roots()[0].to_string(), appendix);
+
+    let missing = json!("0123456789abcdef0123456789abcdef");
+    let forgeries: [(&str, Forge); 5] = [
+        ("a parent that is not in the record", &|record| {
+            record["elements"][&flags]["parent"] = missing.clone();
+        }),
+        ("a child its parent does not list", &|record| {
+            record["elements"][&usage]["children"] = json!([]);
+        }),
+        ("a child listed under another parent", &|record| {
+            record["elements"][&usage]["children"] = json!([]);
+            record["elements"][&appendix]["children"] = json!([flags]);
+        }),
+        ("a child listed twice", &|record| {
+            record["elements"][&usage]["children"] = json!([flags, flags]);
+        }),
+        ("a root that has a parent", &|record| {
+            record["roots"] = json!([document, appendix, flags]);
+        }),
+    ];
+    assert_forgeries_are_corrupted("forged_table", &path, &whole, &forgeries);
+}
+
+/// A payload that is the elements of another record, as they were read.
+struct Copied(Vec<Element>);
+
+impl PayloadType for Copied {
+    const KIND: &'static str = "loose";
+    const VERSION: u32 = 1;
+
+    fn schema_fragment() -> Value {
+        json!({})
+    }
+}
+
+impl Payload for Copied {
+    fn to_elements(&self, _stage: &Stage<Self>) -> Vec<Element> {
+        self.0.clone()
+    }
+
+    fn from_elements(elements: &ElementTable) -> Option<Self> {
+        Some(Self(elements.in_order().cloned().collect()))
+    }
+}
+
+#[test]
+fn elements_read_from_a_record_can_be_written_again_and_read_back() {
+    let build_directory = workspace("rewritten").join(".brio");
+    let writer = RecordWriter::in_build_directory(&build_directory);
+    let reader = RecordReader::in_build_directory(&build_directory);
+    let inputs = inputs("sensor a\n");
+    writer
+        .write(&stage::<Loose>("app::main"), &inputs, &Loose(outline))
+        .expect("the record is written");
+    // The elements as read: each parent already lists its children.
+    let copied = stage::<Copied>("app::main");
+    let read = reader.read(&copied, &inputs).expect("the record is read");
+    let document = copied.id(&["document"]);
+    assert_eq!(
+        read.envelope
+            .elements()
+            .get(&document)
+            .map(|e| e.children().len()),
+        Some(2)
+    );
+
+    writer
+        .write(&copied, &inputs, &read.payload)
+        .expect("the record is written again");
+    let again = reader
+        .read(&copied, &inputs)
+        .expect("the record is read again");
+
+    let children = |record: &brio_lens::Record<Copied>| {
+        record
+            .envelope
+            .elements()
+            .get(&document)
+            .map(|e| e.children().to_vec())
+    };
+    assert_eq!(children(&again), children(&read));
 }

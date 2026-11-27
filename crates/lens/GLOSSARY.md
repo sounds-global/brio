@@ -16,8 +16,20 @@ _Avoid_: dump, trace, snapshot
 A replayable recording of one run under the interpreter or simulator, steppable forward and backward.
 _Avoid_: trace, log
 
+**Stage**:
+One compiler phase at work on one module. It produces one **Stage record**.
+_Avoid_: pass, step
+
+**Element**:
+One thing a stage produced, such as a token or a declaration. It has a **Stable identifier**, a **Payload**, **Provenance** and **Reasons**.
+_Avoid_: node, item, entry
+
+**Element table**:
+The elements of one record, each under its **Stable identifier**. It is flat: an element names its parent and lists its children by stable identifier, whatever the structure of the stage.
+_Avoid_: tree, element list
+
 **Payload**:
-The part of a record that one phase defines in its own types: what that phase produced, or what a run did. Everything else in the record is shared by all phases.
+The part of a record that one phase defines in its own types: what that phase says about each **Element**, or what a run did. Everything else in the record is shared by all phases.
 _Avoid_: body, content
 
 **Payload kind**:
@@ -25,7 +37,7 @@ The name that identifies one payload type in every record and in the published s
 _Avoid_: stage kind, record type
 
 **Envelope**:
-The part of a record that every phase shares: its versions, its **Record key**, the module it is for, the **Payload kind** and a digest that guards the whole record. It wraps the **Payload**.
+The part of a record that every phase shares: its versions, its **Record key**, the module it is for, the **Payload kind**, the structure of the **Element table** and a digest that guards the whole record. It wraps the **Payload**.
 _Avoid_: header, wrapper
 
 **Record key**:
@@ -41,11 +53,15 @@ The name of one element of a **Stage record**, derived from its module, the stag
 _Avoid_: element ID, node ID
 
 **Provenance**:
-The links from an element of a **Stage record** back to the source text and to the elements of the previous stage it derives from.
+The links from an element of a **Stage record** back to the source text and to the elements of the previous stage it derives from. An element the compiler creates also has a **Chain of origin**.
 _Avoid_: lineage, ancestry
 
+**Chain of origin**:
+Every step that made a compiler-created element, such as inlining or monomorphization, from the last step back to an element that comes from source text.
+_Avoid_: history, derivation
+
 **Reason**:
-The recorded justification for one decision a phase made, such as the constraints behind an inferred type.
+The recorded justification for one decision a phase made about an element, such as the constraints behind an inferred type.
 _Avoid_: explanation, rationale
 
 **Stage test**:

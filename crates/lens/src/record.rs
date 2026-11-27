@@ -9,45 +9,53 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::envelope::{RecordDefect, RecordRefusal};
-use crate::json::Value;
-use crate::payload::{self, InvalidPayloadKind, Payload};
-use crate::{Envelope, RecordInputs, RecordKey};
+use crate::payload::Payload;
+use crate::{Envelope, RecordInputs, RecordKey, Stage};
 
-/// A record: the envelope and the payload it wraps.
+/// A record: the envelope, and the payload it wraps.
 ///
-/// The payload is a payload type, or [`Value`] when the reader does not know
-/// the payload's type.
+/// The payload is a payload type, or [`Untyped`] when the reader does not
+/// know the payload's type. Either way the envelope holds every element of
+/// the record, in its element table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Record<P> {
-    /// What the record says about itself.
+    /// What every record shares, with the element table.
     pub envelope: Envelope,
-    /// What the stage produced.
+    /// What the stage produced, in the types of its phase.
     pub payload: P,
 }
 
-impl Record<Value> {
+/// The payload of a record read without its payload type.
+///
+/// It holds nothing itself: the payload of each element is in the element
+/// table of the envelope, as JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Untyped;
+
+impl Record<Untyped> {
     /// This record with its payload as the payload type `P`.
     ///
     /// # Errors
     ///
     /// Fails when the record holds another payload kind or payload version
-    /// than `P` declares, or when its payload is not in the form `P` reads.
+    /// than `P` declares, or when its elements are not in the form `P` reads.
     pub fn typed<P: Payload>(self) -> Result<Record<P>, ReadError> {
-        let payload_kind = payload::kind_of::<P>()?;
         let envelope = self.envelope;
-        if envelope.payload_kind != payload_kind || envelope.payload_version != P::VERSION {
+        // A record never holds an invalid payload kind, so a payload type
+        // that declares one matches no record.
+        if envelope.payload_kind() != P::KIND || envelope.payload_version() != P::VERSION {
             return Err(ReadError::WrongPayload {
-                found_kind: envelope.payload_kind,
-                found_version: envelope.payload_version,
-                expected_kind: payload_kind,
+                found_kind: envelope.payload_kind().to_owned(),
+                found_version: envelope.payload_version(),
+                expected_kind: P::KIND,
                 expected_version: P::VERSION,
             });
         }
-        match P::from_json(&self.payload) {
+        match P::from_elements(envelope.elements()) {
             Some(payload) => Ok(Record { envelope, payload }),
             None => Err(ReadError::InvalidPayload {
-                payload_kind,
-                key: envelope.key,
+                payload_kind: P::KIND,
+                key: envelope.key().clone(),
             }),
         }
     }
@@ -78,11 +86,11 @@ impl RecordWriter {
         }
     }
 
-    /// Writes the record of what a stage produced, as `payload`, from
+    /// Writes the record of what `stage` produced, as `payload`, from
     /// `inputs`, and gives the file it was written to.
     ///
-    /// The record is canonical JSON: the same inputs and payload give the
-    /// same bytes in the same place under the build directory.
+    /// The record is canonical JSON: the same stage, inputs and payload give
+    /// the same bytes in the same place under the build directory.
     ///
     /// # Errors
     ///
@@ -90,12 +98,13 @@ impl RecordWriter {
     /// or when the file cannot be written.
     pub fn write<P: Payload>(
         &self,
+        stage: &Stage<P>,
         inputs: &RecordInputs,
         payload: &P,
     ) -> Result<PathBuf, WriteError> {
-        let (envelope, text) = Envelope::seal(inputs, payload)?;
+        let (envelope, text) = Envelope::seal(stage, inputs, payload)?;
 
-        let path = record_path(&self.directory, &envelope.key);
+        let path = record_path(&self.directory, envelope.key());
         // A reader never sees half a record: the file appears under its
         // name only once it is complete. Its name until then is its
         // writer's alone, so two writers of one record never share it.
@@ -183,22 +192,35 @@ impl RecordReader {
         }
     }
 
-    /// The record of what the stage of payload `P` produced from `inputs`.
+    /// The record of what `stage` produced from `inputs`.
     ///
     /// # Errors
     ///
     /// Fails when there is no record for these inputs, when the record has
     /// a [`RecordDefect`], or when its payload is not a `P`.
-    pub fn read<P: Payload>(&self, inputs: &RecordInputs) -> Result<Record<P>, ReadError> {
-        let key = Envelope::key_of::<P>(inputs)?;
+    pub fn read<P: Payload>(
+        &self,
+        stage: &Stage<P>,
+        inputs: &RecordInputs,
+    ) -> Result<Record<P>, ReadError> {
+        let key = stage.key(inputs);
         let path = record_path(&self.directory, &key);
         if !path.exists() {
             return Err(ReadError::Missing {
-                module: inputs.module.clone(),
+                module: stage.module().to_owned(),
                 payload_kind: P::KIND,
             });
         }
-        read_record(&path, &key)?.typed()
+        let record = read_record(&path, &key)?;
+        // The record key says which stage the record is for, and so does
+        // the record: one that names another has been changed since.
+        if record.envelope.stage() != stage.identity() {
+            return Err(ReadError::Defective {
+                path,
+                defect: RecordDefect::Corrupted,
+            });
+        }
+        record.typed()
     }
 
     /// Every record in the build directory, each with an untyped payload, in
@@ -213,7 +235,7 @@ impl RecordReader {
     /// # Errors
     ///
     /// Fails when the build directory cannot be listed.
-    pub fn read_all(&self) -> Result<Vec<Result<Record<Value>, ReadError>>, ReadError> {
+    pub fn read_all(&self) -> Result<Vec<Result<Record<Untyped>, ReadError>>, ReadError> {
         if !self.directory.exists() {
             return Ok(Vec::new());
         }
@@ -248,7 +270,7 @@ impl RecordReader {
 }
 
 /// The record in `file`, which is stored under the key `stored_under`.
-fn read_record(file: &Path, stored_under: &RecordKey) -> Result<Record<Value>, ReadError> {
+fn read_record(file: &Path, stored_under: &RecordKey) -> Result<Record<Untyped>, ReadError> {
     let defective = |defect| ReadError::Defective {
         path: file.to_owned(),
         defect,
@@ -258,8 +280,11 @@ fn read_record(file: &Path, stored_under: &RecordKey) -> Result<Record<Value>, R
         error,
     })?;
     let text = String::from_utf8(bytes).map_err(|_| defective(RecordDefect::Corrupted))?;
-    let (envelope, payload) = Envelope::open(&text, stored_under).map_err(defective)?;
-    Ok(Record { envelope, payload })
+    let envelope = Envelope::open(&text, stored_under).map_err(defective)?;
+    Ok(Record {
+        envelope,
+        payload: Untyped,
+    })
 }
 
 /// Why a record was not read.
@@ -298,15 +323,13 @@ pub enum ReadError {
         /// The payload version of the payload type asked for.
         expected_version: u32,
     },
-    /// The record's payload is not in the form its payload type reads.
+    /// The record's elements are not in the form its payload type reads.
     InvalidPayload {
         /// The payload kind of the record.
         payload_kind: &'static str,
         /// The record key of the record.
         key: RecordKey,
     },
-    /// The payload type asked for declares an invalid payload kind.
-    InvalidPayloadKind(InvalidPayloadKind),
 }
 
 impl fmt::Display for ReadError {
@@ -335,10 +358,9 @@ impl fmt::Display for ReadError {
             ),
             Self::InvalidPayload { payload_kind, key } => write!(
                 f,
-                "the payload of the `{payload_kind}` record `{key}` is not a `{payload_kind}` \
+                "the elements of the `{payload_kind}` record `{key}` are not a `{payload_kind}` \
                  payload"
             ),
-            Self::InvalidPayloadKind(error) => error.fmt(f),
         }
     }
 }
@@ -347,14 +369,7 @@ impl std::error::Error for ReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { error, .. } => Some(error),
-            Self::InvalidPayloadKind(error) => Some(error),
             _ => None,
         }
-    }
-}
-
-impl From<InvalidPayloadKind> for ReadError {
-    fn from(error: InvalidPayloadKind) -> Self {
-        Self::InvalidPayloadKind(error)
     }
 }

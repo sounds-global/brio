@@ -5,19 +5,18 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+#[cfg(doc)]
+use crate::Stage;
 use crate::hash::{self, FieldHasher};
+use crate::stage::StageIdentity;
 
-/// Everything a record is computed from, apart from the stage that
-/// computes it.
+/// Everything a record is computed from, apart from the [`Stage`] that
+/// computes it: the payload type and the module.
 ///
 /// A record is stored under the hash of these inputs and of its stage, so a
 /// change to any of them gives another record and never an out-of-date one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordInputs {
-    /// The module the record is for, by its name in the workspace. The name
-    /// is written in the record, so it is never an absolute path: the record
-    /// writer refuses one.
-    pub module: String,
     /// The inputs of the module, by name: its source and the interfaces of
     /// the modules it depends on. Each is the content itself or a hash of it.
     pub module_inputs: BTreeMap<String, Vec<u8>>,
@@ -30,13 +29,13 @@ pub struct RecordInputs {
 }
 
 impl RecordInputs {
-    /// The key of the record that the stage with this payload kind and
-    /// payload version computes from these inputs.
-    pub(crate) fn key(&self, payload_kind: &str, payload_version: u32) -> RecordKey {
+    /// The key of the record that `stage`, with this payload version,
+    /// computes from these inputs.
+    pub(crate) fn key(&self, stage: &StageIdentity, payload_version: u32) -> RecordKey {
         let mut hasher = FieldHasher::new("brio lens record key");
-        hasher.text(payload_kind);
+        hasher.text(stage.payload_kind());
         hasher.number(u64::from(payload_version));
-        hasher.text(&self.module);
+        hasher.text(stage.module());
         hasher.count(self.module_inputs.len());
         for (name, content) in &self.module_inputs {
             hasher.text(name);
