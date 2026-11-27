@@ -549,3 +549,35 @@ fn lens_test_is_an_error_when_a_record_set_holds_the_records_of_two_builds() {
          holds the records of more than one build\n"
     );
 }
+
+#[test]
+fn lens_test_is_an_error_when_a_record_is_misnamed_in_both_record_sets() {
+    let sets = record_sets("lens_test_misnamed");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    let mut misnamed = Vec::new();
+    for (set, value) in [(&produced, 1), (&reference, 2)] {
+        write_record(set, "app::main", "0.1.0", &[("a", value)]);
+        let record = fs::read_dir(set.join("lens"))
+            .expect("the records can be listed")
+            .next()
+            .expect("the set has a record")
+            .expect("the record can be listed")
+            .path();
+        misnamed.push(record.with_extension("JSON"));
+        fs::rename(&record, &misnamed[misnamed.len() - 1]).expect("the record can be renamed");
+        // Another stage, the same in both sets.
+        write_record(set, "app::motor", "0.1.0", &[("e", 1)]);
+    }
+
+    let output = lens_test(&produced, &reference);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "brio: the record `{}` is corrupted\n",
+            misnamed[0].display()
+        )
+    );
+}

@@ -927,3 +927,72 @@ fn the_disabled_writer_does_no_work_for_a_record() {
 
     assert_eq!(written, None);
 }
+
+#[test]
+fn a_file_that_is_not_named_as_a_record_is_given_as_an_error_and_hides_no_other_record() {
+    let build_directory = workspace("misnamed").join(".brio");
+    let inputs = inputs("sensor a\n");
+    let probe_record = write_record(
+        &build_directory,
+        &stage::<Probe>("app::main"),
+        &inputs,
+        &probe(&[("a", 7)]),
+    );
+    write_record(
+        &build_directory,
+        &stage::<Gauge>("app::main"),
+        &inputs,
+        &Gauge("steady".to_owned()),
+    );
+    let misnamed = probe_record.with_extension("JSON");
+    fs::rename(&probe_record, &misnamed).expect("the record can be renamed");
+    let foreign = probe_record.with_file_name("notes.txt");
+    fs::write(&foreign, "not a record\n").expect("a foreign file can be added");
+
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+
+    let whole: Vec<&str> = records
+        .iter()
+        .flatten()
+        .map(|record| record.envelope.payload_kind())
+        .collect();
+    assert_eq!(whole, ["gauge"]);
+    let mut not_records: Vec<&PathBuf> = records
+        .iter()
+        .filter_map(|record| match record {
+            Err(ReadError::Defective {
+                path,
+                defect: RecordDefect::Corrupted,
+            }) => Some(path),
+            _ => None,
+        })
+        .collect();
+    not_records.sort();
+    let mut expected = [&misnamed, &foreign];
+    expected.sort();
+    assert_eq!(not_records, expected);
+    assert_eq!(records.len(), 3);
+}
+
+#[test]
+fn a_record_that_a_writer_has_not_finished_is_no_record_yet() {
+    let build_directory = workspace("unfinished").join(".brio");
+    let path = write_record(
+        &build_directory,
+        &stage::<Probe>("app::main"),
+        &inputs("sensor a\n"),
+        &probe(&[("a", 7)]),
+    );
+    // What a writer of the same record leaves until its record is complete.
+    fs::write(path.with_extension("4242-0.unfinished"), "{\n  \"dig")
+        .expect("an unfinished file can be added");
+
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+
+    assert_eq!(records.len(), 1);
+    assert!(records[0].is_ok());
+}

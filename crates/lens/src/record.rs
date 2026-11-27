@@ -67,9 +67,22 @@ fn records_directory(build_directory: PathBuf) -> PathBuf {
     build_directory.join("lens")
 }
 
+/// What ends the name of the file of a record, after its record key.
+const RECORD_SUFFIX: &str = ".json";
+/// The extension of the file of a record its writer has not finished.
+const UNFINISHED: &str = "unfinished";
+
 /// Where the record with `key` is kept.
 fn record_path(records_directory: &Path, key: &RecordKey) -> PathBuf {
-    records_directory.join(format!("{key}.json"))
+    records_directory.join(format!("{key}{RECORD_SUFFIX}"))
+}
+
+/// The record key that the file `file` is named for, or `None` when it is
+/// not named as a record: a record is stored under its record key and under
+/// no other name.
+fn stored_under(file: &Path) -> Option<RecordKey> {
+    let key = file.file_name()?.to_str()?.strip_suffix(RECORD_SUFFIX)?;
+    RecordKey::from_hex(key.to_owned())
 }
 
 /// Writes records into a build directory, or, when Lens is off, drops them.
@@ -143,7 +156,7 @@ impl RecordWriter {
         // writer's alone, so two writers of one record never share it.
         static WRITES: AtomicU64 = AtomicU64::new(0);
         let unfinished = path.with_extension(format!(
-            "{}-{}.unfinished",
+            "{}-{}.{UNFINISHED}",
             std::process::id(),
             WRITES.fetch_add(1, Ordering::Relaxed)
         ));
@@ -258,7 +271,11 @@ impl RecordReader {
 
     /// Every record in the build directory, each with an untyped payload, in
     /// the order of their file names. A record that cannot be read is given
-    /// as its error, in its place, and hides no other record.
+    /// as its error, in its place, and hides no other record. So is anything
+    /// else in the records of the build directory that is not named as a
+    /// record: a reader is never given a record set with a record missing
+    /// as if it were whole. Only a record its writer has not finished is
+    /// passed over: it is no record yet.
     ///
     /// This reads records of any payload kind, including those of payload
     /// types the caller does not know. It does not know the inputs of any
@@ -279,23 +296,20 @@ impl RecordReader {
         let mut paths = Vec::new();
         for entry in fs::read_dir(&self.directory).map_err(io_error)? {
             let path = entry.map_err(io_error)?.path();
-            if path
+            let unfinished = path
                 .extension()
-                .is_some_and(|extension| extension == "json")
-            {
+                .is_some_and(|extension| extension == UNFINISHED);
+            if !unfinished {
                 paths.push(path);
             }
         }
         paths.sort();
 
         let read = |path: &PathBuf| {
-            // A record is stored under its record key and under no other name.
-            let name = path.file_stem().unwrap_or_default().to_string_lossy();
-            let stored_under =
-                RecordKey::from_hex(name.into_owned()).ok_or_else(|| ReadError::Defective {
-                    path: path.clone(),
-                    defect: RecordDefect::Corrupted,
-                })?;
+            let stored_under = stored_under(path).ok_or_else(|| ReadError::Defective {
+                path: path.clone(),
+                defect: RecordDefect::Corrupted,
+            })?;
             read_record(path, &stored_under)
         };
         Ok(paths.iter().map(read).collect())
