@@ -28,9 +28,7 @@ fn write<P: Payload>(test: &str, payload: &P) -> Stage<P> {
 /// as `payload`, into the build directory of `test`.
 fn write_for<P: Payload>(test: &str, module: &str, payload: &P) -> Stage<P> {
     let stage = stage::<P>(module);
-    RecordWriter::in_build_directory(build_directory(test))
-        .write(&stage, || inputs(SOURCE), payload)
-        .expect("the record is written");
+    write_record(build_directory(test), &stage, &inputs(SOURCE), payload);
     stage
 }
 

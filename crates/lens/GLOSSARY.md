@@ -69,7 +69,7 @@ A confidential value, such as one of a `Secret` or `Sensitive` type, that a phas
 _Avoid_: redacted value, hidden value
 
 **Masked marker**:
-What an element or a **Reason** holds for each **Masked value**: the place where the value was, in its **Payload** or its justification. The record holds null at that place and nothing of the value. A marker is beside the payload, never inside it.
+What an element or a **Reason** holds for each **Masked value**: the place where the value was, in its **Payload** or its justification. The record holds null at that place and nothing of the value. A marker is beside the payload, never inside it, and one place has one marker.
 _Avoid_: placeholder, redaction
 
 **Disabled writer**:

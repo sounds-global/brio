@@ -78,16 +78,16 @@ fn record_path(records_directory: &Path, key: &RecordKey) -> PathBuf {
 /// [disabled](RecordWriter::disabled) writer does no work for a record.
 #[derive(Debug)]
 pub struct RecordWriter {
-    lens: Lens,
+    records: Records,
 }
 
-/// Whether a build records what it does.
+/// What becomes of the records a writer is handed.
 #[derive(Debug)]
-enum Lens {
+enum Records {
     /// Lens is on: records are kept in `directory`.
-    On { directory: PathBuf },
+    Kept { directory: PathBuf },
     /// Lens is off: no record is made.
-    Off,
+    Dropped,
 }
 
 impl RecordWriter {
@@ -95,7 +95,7 @@ impl RecordWriter {
     #[must_use]
     pub fn in_build_directory(build_directory: impl Into<PathBuf>) -> Self {
         Self {
-            lens: Lens::On {
+            records: Records::Kept {
                 directory: records_directory(build_directory.into()),
             },
         }
@@ -106,7 +106,9 @@ impl RecordWriter {
     /// elements of a payload, and it serializes, hashes and writes nothing.
     #[must_use]
     pub fn disabled() -> Self {
-        Self { lens: Lens::Off }
+        Self {
+            records: Records::Dropped,
+        }
     }
 
     /// Writes the record of what `stage` produced, as `payload`, from
@@ -130,7 +132,7 @@ impl RecordWriter {
         inputs: impl FnOnce() -> I,
         payload: &P,
     ) -> Result<Option<PathBuf>, WriteError> {
-        let Lens::On { directory } = &self.lens else {
+        let Records::Kept { directory } = &self.records else {
             return Ok(None);
         };
         let (envelope, text) = Envelope::seal(stage, inputs().borrow(), payload)?;

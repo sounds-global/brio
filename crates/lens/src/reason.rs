@@ -53,29 +53,30 @@ impl Reason {
 
     /// This reason, with the value at `place` in its justification masked.
     ///
-    /// `place` is a JSON Pointer (RFC 6901) into the justification, as for
+    /// `place` is the path to the value in the justification, as for
     /// [`Element::masked_at`](crate::Element::masked_at). The value is
     /// dropped here, so its content is in no record.
     #[must_use]
-    pub fn masked_at(mut self, place: &str) -> Self {
+    pub fn masked_at(mut self, place: &[&str]) -> Self {
         self.masked.mask(&mut self.because, place);
         self
     }
 
-    /// Whether the value at `place` in the justification was masked: the
-    /// justification holds null there in place of a confidential value.
+    /// Whether the value at `place` in the justification was masked, alone
+    /// or with a value it is inside.
     #[must_use]
-    pub fn is_masked(&self, place: &str) -> bool {
+    pub fn is_masked(&self, place: &[&str]) -> bool {
         self.masked.has(place)
     }
 
-    /// Every place in the justification where a value was masked, in order.
+    /// The masked markers of the justification: every place where a value
+    /// was masked, as a JSON Pointer (RFC 6901), in the order of their text.
     pub fn masked(&self) -> impl Iterator<Item = &str> {
-        self.masked.places()
+        self.masked.markers()
     }
 
-    /// A masked marker of this reason that names a place where its
-    /// justification holds no masked value.
+    /// A masked marker of this reason that names a place where no value of
+    /// its justification was masked.
     pub(crate) fn misplaced_marker(&self) -> Option<&str> {
         self.masked.misplaced_in(&self.because)
     }

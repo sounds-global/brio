@@ -43,6 +43,7 @@ pub use element::{Element, ElementTable};
 pub use envelope::{Envelope, RecordDefect, RecordRefusal};
 pub use identity::StableId;
 pub use inputs::{RecordInputs, RecordKey};
+pub use mask::MaskedPart;
 pub use payload::{InvalidPayloadKind, Payload, PayloadSchema, PayloadType};
 pub use provenance::{ElementLink, OriginStep, Provenance, SourceSpan};
 pub use reason::Reason;

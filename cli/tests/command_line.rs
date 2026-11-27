@@ -19,11 +19,12 @@ const ENVELOPE_SCHEMA: &str = r##"{
           "type": "array"
         },
         "masked": {
-          "description": "The masked markers of the payload: every place in it where a value was masked, in order and once each.",
+          "description": "The masked markers of the payload: every place in it where a value was masked, once each, in the order of their text. No marker is inside another.",
           "items": {
             "$ref": "#/$defs/masked_marker"
           },
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "parent": {
           "description": "The element this one is inside, or null for a root.",
@@ -161,11 +162,12 @@ const ENVELOPE_SCHEMA: &str = r##"{
           "type": "array"
         },
         "masked": {
-          "description": "The masked markers of the justification: every place in it where a value was masked, in order and once each.",
+          "description": "The masked markers of the justification: every place in it where a value was masked, once each, in the order of their text. No marker is inside another.",
           "items": {
             "$ref": "#/$defs/masked_marker"
           },
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [

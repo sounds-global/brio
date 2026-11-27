@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use brio_lens::json::{self, Value, json};
 use brio_lens::{
     Element, ElementTable, Envelope, Payload, PayloadType, ReadError, RecordDefect, RecordInputs,
-    RecordReader, RecordWriter, Stage,
+    RecordReader, RecordRefusal, RecordWriter, Stage, WriteError,
 };
 
 /// A payload no phase owns: the reading of every sensor a module declares.
@@ -152,6 +152,24 @@ pub fn write_record<P: Payload>(
         .write(stage, || inputs, payload)
         .expect("the record is written")
         .expect("the writer is not the disabled writer")
+}
+
+/// What the writer says when asked to write `elements`, in the workspace of
+/// the test called `test`. Nothing of a refused record is written.
+pub fn refusal(test: &str, elements: fn(&Stage<Loose>) -> Vec<Element>) -> RecordRefusal {
+    let workspace = workspace(test);
+    let error = RecordWriter::in_build_directory(build_directory(test))
+        .write(
+            &stage::<Loose>("app::main"),
+            || inputs("sensor a\n"),
+            &Loose(elements),
+        )
+        .expect_err("the record is refused");
+    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
+    match error {
+        WriteError::Refused(refusal) => refusal,
+        other => panic!("the write failed in an unexpected way: {other}"),
+    }
 }
 
 /// The stage of payload `P` for `module`.

@@ -16,7 +16,7 @@ use brio_lens::{
 
 use support::{
     Forge, Gauge, Loose, Probe, assert_forgeries_are_corrupted, envelopes, files_under, inputs,
-    nested, probe, resealed, stage, tamper, with_its_own_digest, workspace, write_record,
+    nested, probe, refusal, resealed, stage, tamper, with_its_own_digest, workspace, write_record,
 };
 
 /// A payload of numbers that are not whole.
@@ -62,9 +62,7 @@ fn writing_then_reading_a_record_gives_back_the_same_envelope_and_payload() {
     let inputs = inputs("sensor a\nsensor b\n");
     let written = probe(&[("a", 7), ("b", -2)]);
 
-    RecordWriter::in_build_directory(&build_directory)
-        .write(&stage, || &inputs, &written)
-        .expect("the record is written");
+    write_record(&build_directory, &stage, &inputs, &written);
     let record = RecordReader::in_build_directory(&build_directory)
         .read(&stage, &inputs)
         .expect("the record is read");
@@ -101,9 +99,7 @@ fn numbers_that_are_not_whole_read_back_exactly() {
         std::f64::consts::E * 1.0e-100,
     ]);
 
-    RecordWriter::in_build_directory(&build_directory)
-        .write(&stage, || &inputs, &written)
-        .expect("the record is written");
+    write_record(&build_directory, &stage, &inputs, &written);
     let record = RecordReader::in_build_directory(&build_directory)
         .read(&stage, &inputs)
         .expect("the record is read");
@@ -119,9 +115,7 @@ fn writers_of_the_same_record_at_the_same_time_all_succeed() {
 
     let write_often = || {
         for _ in 0..50 {
-            RecordWriter::in_build_directory(&build_directory)
-                .write(&stage, || &inputs, &probe(&[("a", 7)]))
-                .expect("the record is written");
+            write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
         }
     };
     std::thread::scope(|scope| {
@@ -204,9 +198,12 @@ fn records_are_written_under_the_build_directory_and_nowhere_else() {
 fn a_record_with_an_unknown_payload_type_reads_as_an_untyped_payload() {
     let build_directory = workspace("untyped").join(".brio");
     let stage = stage::<Gauge>("app::main");
-    RecordWriter::in_build_directory(&build_directory)
-        .write(&stage, || inputs("sensor a\n"), &Gauge("steady".to_owned()))
-        .expect("the record is written");
+    write_record(
+        &build_directory,
+        &stage,
+        &inputs("sensor a\n"),
+        &Gauge("steady".to_owned()),
+    );
     let reader = RecordReader::in_build_directory(&build_directory);
 
     let records = reader.read_all().expect("the records are read");
@@ -326,9 +323,7 @@ fn a_change_to_any_input_gives_another_record_key() {
     let build_directory = workspace("key").join(".brio");
     let stage = stage::<Probe>("app::main");
     let original = inputs("sensor a\n");
-    RecordWriter::in_build_directory(&build_directory)
-        .write(&stage, || &original, &probe(&[("a", 7)]))
-        .expect("the record is written");
+    write_record(&build_directory, &stage, &original, &probe(&[("a", 7)]));
     let reader = RecordReader::in_build_directory(&build_directory);
     let key = reader
         .read(&stage, &original)
@@ -720,24 +715,6 @@ fn a_record_of_another_module_under_the_right_record_key_is_rejected() {
             ..
         })
     ));
-}
-
-/// What the writer says when asked to write `elements`.
-fn refusal(test: &str, elements: fn(&Stage<Loose>) -> Vec<Element>) -> RecordRefusal {
-    let workspace = workspace(test);
-    let error = RecordWriter::in_build_directory(workspace.join(".brio"))
-        .write(
-            &stage::<Loose>("app::main"),
-            || inputs("sensor a\n"),
-            &Loose(elements),
-        )
-        .expect_err("the record is refused");
-    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
-    match error {
-        WriteError::Refused(refusal) => refusal,
-        other @ WriteError::Io { .. } => panic!("the write failed: {other}"),
-        other => panic!("the write failed in an unexpected way: {other}"),
-    }
 }
 
 #[test]

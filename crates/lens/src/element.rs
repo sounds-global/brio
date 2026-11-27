@@ -16,7 +16,6 @@ const PARENT: &str = "parent";
 const CHILDREN: &str = "children";
 /// The JSON name of the payload of an element.
 const PAYLOAD: &str = "payload";
-
 /// The JSON name of the masked markers of an element.
 const MASKED: &str = mask::MASKED;
 /// The JSON name of the provenance of an element.
@@ -66,17 +65,18 @@ impl Element {
     /// This element, with the value at `place` in its payload masked.
     ///
     /// A phase calls this for every value of a `Secret` or `Sensitive` type
-    /// in the payload. `place` is a JSON Pointer (RFC 6901) into the payload,
-    /// such as `/value` or `/arguments/0`. The value is dropped here, so its
-    /// content is in no record: the record holds null at `place`, and a
-    /// masked marker that names it.
+    /// in the payload. `place` is the path to the value, from the outside
+    /// in, by name and by position in a list, such as `["value"]` or
+    /// `["arguments", "0"]`. The value is dropped here, so its content is in
+    /// no record: the record holds null at `place`, and a masked marker that
+    /// names it. What is inside a masked value is masked with it.
     ///
-    /// The record writer refuses a marker at a place the payload does not
-    /// have. Only the payload and the justification of a reason can be
+    /// The record writer refuses the record when the payload holds nothing
+    /// at `place`: the value to mask is then somewhere else. Only the payload and the justification of a reason can be
     /// masked: a confidential value never goes in a stable identifier, in
     /// the provenance or in the decision of a reason.
     #[must_use]
-    pub fn masked_at(mut self, place: &str) -> Self {
+    pub fn masked_at(mut self, place: &[&str]) -> Self {
         self.masked.mask(&mut self.payload, place);
         self
     }
@@ -152,16 +152,19 @@ impl Element {
         &self.payload
     }
 
-    /// Whether the value at `place` in the payload was masked: the payload
-    /// holds null there in place of a confidential value.
+    /// Whether the value at `place` in the payload was masked, alone or
+    /// with a value it is inside: the payload holds null in place of a
+    /// confidential value. `place` is the path that
+    /// [`Element::masked_at`] takes.
     #[must_use]
-    pub fn is_masked(&self, place: &str) -> bool {
+    pub fn is_masked(&self, place: &[&str]) -> bool {
         self.masked.has(place)
     }
 
-    /// Every place in the payload where a value was masked, in order.
+    /// The masked markers of the payload: every place where a value was
+    /// masked, as a JSON Pointer (RFC 6901), in the order of their text.
     pub fn masked(&self) -> impl Iterator<Item = &str> {
-        self.masked.places()
+        self.masked.markers()
     }
 
     /// Where this element comes from.

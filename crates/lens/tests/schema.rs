@@ -368,5 +368,7 @@ fn the_schema_describes_the_masked_markers_of_a_payload_and_of_a_reason() {
         let markers = &schema["$defs"][name]["properties"]["masked"];
         assert_eq!(markers["type"], "array", "of `{name}`");
         assert_eq!(markers["items"], to("masked_marker"), "of `{name}`");
+        // A reader rejects a record that has one marker twice.
+        assert_eq!(markers["uniqueItems"], true, "of `{name}`");
     }
 }

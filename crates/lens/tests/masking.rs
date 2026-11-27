@@ -9,11 +9,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use brio_lens::json::{self, Value, json};
-use brio_lens::{Element, Reason, RecordRefusal, RecordWriter, Stage, WriteError};
+use brio_lens::{Element, MaskedPart, Reason, RecordRefusal, Stage};
 
 use support::{
     Forge, Loose, assert_forgeries_are_corrupted, build_directory, envelopes, files_under, inputs,
-    stage, workspace, write_record,
+    refusal, stage, workspace, write_record,
 };
 
 /// The source of the module `app::main`, which holds a confidential value.
@@ -27,10 +27,10 @@ fn binding(stage: &Stage<Loose>) -> Vec<Element> {
             stage.id(&["binding", "token"]),
             json!({ "name": "token", "value": "hunter2", "unit": null }),
         )
-        .masked_at("/value")
+        .masked_at(&["value"])
         .because(
             Reason::new("folded constant", json!({ "folded_to": ["hunter2"] }))
-                .masked_at("/folded_to/0"),
+                .masked_at(&["folded_to", "0"]),
         ),
     ]
 }
@@ -86,66 +86,50 @@ fn a_masked_marker_reads_back_as_masked() {
         .get(&stage.id(&["binding", "token"]))
         .expect("the element is in the record");
 
-    assert!(element.is_masked("/value"));
+    assert!(element.is_masked(&["value"]));
     assert_eq!(element.masked().collect::<Vec<_>>(), ["/value"]);
     // A value that is absent is not a masked one.
-    assert!(!element.is_masked("/unit"));
-    assert!(!element.is_masked("/name"));
+    assert!(!element.is_masked(&["unit"]));
+    assert!(!element.is_masked(&["name"]));
     let [reason] = element.reasons() else {
         panic!("the element has one reason");
     };
-    assert!(reason.is_masked("/folded_to/0"));
-    assert!(!reason.is_masked("/folded_to"));
+    assert!(reason.is_masked(&["folded_to", "0"]));
+    assert!(!reason.is_masked(&["folded_to"]));
+    assert_eq!(reason.masked().collect::<Vec<_>>(), ["/folded_to/0"]);
 }
 
 #[test]
 fn a_payload_is_free_to_hold_what_looks_like_a_masked_marker() {
     workspace("masked_lookalike");
     let stage = stage::<Loose>("app::main");
-    RecordWriter::in_build_directory(build_directory("masked_lookalike"))
-        .write(
-            &stage,
-            || inputs(SOURCE),
-            &Loose(|stage| {
-                vec![Element::new(
-                    stage.id(&["literal"]),
-                    json!({ "masked": ["/value"], "$masked": true, "value": null }),
-                )]
-            }),
-        )
-        .expect("the record is written");
+    write_record(
+        build_directory("masked_lookalike"),
+        &stage,
+        &inputs(SOURCE),
+        &Loose(|stage| {
+            vec![Element::new(
+                stage.id(&["literal"]),
+                json!({ "masked": ["/value"], "$masked": true, "value": null }),
+            )]
+        }),
+    );
 
     let envelopes = envelopes("masked_lookalike");
     let element = envelopes[0]
         .elements()
         .get(&stage.id(&["literal"]))
         .expect("the element is in the record");
-    assert!(!element.is_masked("/value"));
+    assert!(!element.is_masked(&["value"]));
     assert_eq!(element.masked().count(), 0);
-}
-
-/// What the writer says when asked to write `elements`.
-fn refusal(test: &str, elements: fn(&Stage<Loose>) -> Vec<Element>) -> RecordRefusal {
-    let workspace = workspace(test);
-    let error = RecordWriter::in_build_directory(build_directory(test))
-        .write(
-            &stage::<Loose>("app::main"),
-            || inputs(SOURCE),
-            &Loose(elements),
-        )
-        .expect_err("the record is refused");
-    assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
-    match error {
-        WriteError::Refused(refusal) => refusal,
-        other => panic!("the write failed in an unexpected way: {other}"),
-    }
 }
 
 #[test]
 fn a_masked_marker_where_no_value_was_masked_is_not_written() {
     let token = stage::<Loose>("app::main").id(&["binding", "token"]);
-    let misplaced = |place: &str| RecordRefusal::MisplacedMaskedMarker {
+    let misplaced = |part: MaskedPart, place: &str| RecordRefusal::MisplacedMaskedMarker {
         element: token.clone(),
+        part,
         place: place.to_owned(),
     };
 
@@ -155,35 +139,142 @@ fn a_masked_marker_where_no_value_was_masked_is_not_written() {
                 stage.id(&["binding", "token"]),
                 json!({ "value": "hunter2" }),
             )
-            .masked_at("/missing"),
+            .masked_at(&["missing"]),
         ]
     });
-    assert_eq!(nowhere, misplaced("/missing"));
+    assert_eq!(nowhere, misplaced(MaskedPart::Payload, "/missing"));
     assert_eq!(
         nowhere.to_string(),
         format!(
-            "the element `{token}` has a masked marker at `/missing`, where no value was masked"
+            "the element `{token}` has a masked marker at `/missing` in its payload, where no \
+             value was masked"
         )
     );
 
-    let not_a_place = refusal("masked_not_a_place", |stage| {
+    // A place that holds nothing is not one where a value was masked: the
+    // value is somewhere else, and would be written.
+    let on_nothing = refusal("masked_nothing", |stage| {
         vec![
             Element::new(
                 stage.id(&["binding", "token"]),
-                json!({ "value": "hunter2" }),
+                json!({ "value": "hunter2", "unit": null }),
             )
-            .masked_at("value"),
+            .masked_at(&["unit"]),
         ]
     });
-    assert_eq!(not_a_place, misplaced("value"));
+    assert_eq!(on_nothing, misplaced(MaskedPart::Payload, "/unit"));
+
+    let beyond_a_list = refusal("masked_beyond_a_list", |stage| {
+        vec![Element::new(stage.id(&["binding", "token"]), json!(["hunter2"])).masked_at(&["01"])]
+    });
+    assert_eq!(beyond_a_list, misplaced(MaskedPart::Payload, "/01"));
 
     let put_back = refusal("masked_put_back", |stage| {
         let mut reason = Reason::new("folded constant", json!({ "folded_to": "hunter2" }))
-            .masked_at("/folded_to");
+            .masked_at(&["folded_to"]);
         reason.because = json!({ "folded_to": "hunter2" });
         vec![Element::new(stage.id(&["binding", "token"]), json!("token")).because(reason)]
     });
-    assert_eq!(put_back, misplaced("/folded_to"));
+    assert_eq!(put_back, misplaced(MaskedPart::Reason, "/folded_to"));
+    assert_eq!(
+        put_back.to_string(),
+        format!(
+            "the element `{token}` has a masked marker at `/folded_to` in a reason, where no \
+             value was masked"
+        )
+    );
+}
+
+/// The one element of the record that `elements` describes, written into the
+/// build directory of `test` and read back.
+fn read_back(test: &str, elements: fn(&Stage<Loose>) -> Vec<Element>) -> Element {
+    workspace(test);
+    let stage = stage::<Loose>("app::main");
+    write_record(
+        build_directory(test),
+        &stage,
+        &inputs(SOURCE),
+        &Loose(elements),
+    );
+    let envelopes = envelopes(test);
+    let mut read = envelopes[0].elements().iter().cloned();
+    match (read.next(), read.next()) {
+        (Some(element), None) => element,
+        _ => panic!("the record has one element"),
+    }
+}
+
+#[test]
+fn a_value_masked_with_what_it_is_inside_leaves_one_masked_marker() {
+    let inside_first = read_back("masked_inside_first", |stage| {
+        vec![
+            Element::new(
+                stage.id(&["account"]),
+                json!({ "owner": { "name": "ada", "token": "hunter2" } }),
+            )
+            .masked_at(&["owner", "token"])
+            .masked_at(&["owner"]),
+        ]
+    });
+    let outside_first = read_back("masked_outside_first", |stage| {
+        vec![
+            Element::new(
+                stage.id(&["account"]),
+                json!({ "owner": { "name": "ada", "token": "hunter2" } }),
+            )
+            .masked_at(&["owner"])
+            .masked_at(&["owner", "token"])
+            .masked_at(&["owner"]),
+        ]
+    });
+
+    assert_eq!(inside_first, outside_first);
+    assert_eq!(inside_first.payload(), &json!({ "owner": null }));
+    assert_eq!(inside_first.masked().collect::<Vec<_>>(), ["/owner"]);
+    // What is inside a masked value was masked with it.
+    assert!(inside_first.is_masked(&["owner"]));
+    assert!(inside_first.is_masked(&["owner", "token"]));
+}
+
+#[test]
+fn a_place_has_one_spelling_whatever_its_names_are_made_of() {
+    let element = read_back("masked_spelling", |stage| {
+        vec![
+            Element::new(
+                stage.id(&["literal"]),
+                json!({ "~": "hunter2", "a/b": "hunter2", "": "hunter2", "~1": [0, "hunter2"] }),
+            )
+            .masked_at(&["~"])
+            .masked_at(&["a/b"])
+            .masked_at(&[""])
+            .masked_at(&["~1", "1"]),
+        ]
+    });
+
+    assert_eq!(
+        element.payload(),
+        &json!({ "~": null, "a/b": null, "": null, "~1": [0, null] })
+    );
+    // The places as JSON Pointers, in the order of their text.
+    assert_eq!(
+        element.masked().collect::<Vec<_>>(),
+        ["/", "/a~1b", "/~0", "/~01/1"]
+    );
+    assert!(element.is_masked(&["~"]));
+    assert!(element.is_masked(&["a/b"]));
+    assert!(element.is_masked(&["~1", "1"]));
+    assert!(!element.is_masked(&["~1", "0"]));
+}
+
+#[test]
+fn the_whole_of_a_payload_can_be_masked() {
+    let element = read_back("masked_whole", |stage| {
+        vec![Element::new(stage.id(&["literal"]), json!("hunter2")).masked_at(&[])]
+    });
+
+    assert_eq!(element.payload(), &Value::Null);
+    assert_eq!(element.masked().collect::<Vec<_>>(), [""]);
+    assert!(element.is_masked(&[]));
 }
 
 #[test]
@@ -206,6 +297,14 @@ fn a_record_with_a_value_where_one_was_masked_is_rejected_even_with_a_matching_d
     let a_marker_twice: Forge = &|record| {
         record["elements"][&id]["masked"] = json!(["/value", "/value"]);
     };
+    let a_marker_inside_another: Forge = &|record| {
+        record["elements"][&id]["payload"] = json!(null);
+        record["elements"][&id]["masked"] = json!(["", "/value"]);
+    };
+    let a_marker_that_is_no_pointer: Forge = &|record| {
+        record["elements"][&id]["payload"] = json!({ "~": null });
+        record["elements"][&id]["masked"] = json!(["/~"]);
+    };
     assert_forgeries_are_corrupted(
         "masked_forged",
         &path,
@@ -215,6 +314,11 @@ fn a_record_with_a_value_where_one_was_masked_is_rejected_even_with_a_matching_d
             ("a justification where one was masked", a_reason_put_back),
             ("a masked marker where a value is", a_marker_elsewhere),
             ("one masked marker twice", a_marker_twice),
+            ("a masked marker inside another", a_marker_inside_another),
+            (
+                "a masked marker that is no JSON Pointer",
+                a_marker_that_is_no_pointer,
+            ),
         ],
     );
 }
