@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::stage::StageIdentity;
 use crate::{ElementTable, Envelope, StableId};
 
 /// A Stage test: the comparison of a set of produced records against a set
@@ -34,15 +35,16 @@ impl StageTest {
     pub fn compare<'a>(
         produced: impl IntoIterator<Item = &'a Envelope>,
         reference: impl IntoIterator<Item = &'a Envelope>,
-    ) -> Result<Self, AmbiguousStage> {
+    ) -> Result<Self, StageTestError> {
         let produced = by_stage(RecordSet::Produced, produced)?;
         let reference = by_stage(RecordSet::Reference, reference)?;
-        let stages: BTreeSet<&StageName> = produced.keys().chain(reference.keys()).collect();
+        let stages: BTreeSet<&StageIdentity> =
+            produced.keys().chain(reference.keys()).copied().collect();
         let differences = stages
             .into_iter()
             .filter_map(|stage| {
                 let record = |set: &BTreeMap<_, &'a Envelope>| set.get(stage).copied();
-                StageDifference::between(*stage, record(&produced), record(&reference))
+                StageDifference::between(stage, record(&produced), record(&reference))
             })
             .collect();
         Ok(Self { differences })
@@ -62,22 +64,19 @@ impl StageTest {
     }
 }
 
-/// What names a stage in a record set: its module, then its payload kind.
-type StageName<'a> = (&'a str, &'a str);
-
-/// The records of `set` with `envelopes`, each under the name of its stage.
+/// The records of `set` with `envelopes`, each under its stage.
 fn by_stage<'a>(
     set: RecordSet,
     envelopes: impl IntoIterator<Item = &'a Envelope>,
-) -> Result<BTreeMap<StageName<'a>, &'a Envelope>, AmbiguousStage> {
+) -> Result<BTreeMap<&'a StageIdentity, &'a Envelope>, StageTestError> {
     let mut records = BTreeMap::new();
     for envelope in envelopes {
-        let stage = (envelope.module(), envelope.payload_kind());
+        let stage = envelope.stage();
         if records.insert(stage, envelope).is_some() {
-            return Err(AmbiguousStage {
+            return Err(StageTestError::TwoRecordsOfOneStage {
                 set,
-                module: stage.0.to_owned(),
-                payload_kind: stage.1.to_owned(),
+                module: stage.module().to_owned(),
+                payload_kind: stage.payload_kind().to_owned(),
             });
         }
     }
@@ -89,10 +88,8 @@ fn by_stage<'a>(
 /// Every list of elements is in the order of their stable identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageDifference {
-    module: String,
-    payload_kind: String,
-    produced_payload_version: Option<u32>,
-    reference_payload_version: Option<u32>,
+    stage: StageIdentity,
+    records: ComparedRecords,
     added: Vec<StableId>,
     removed: Vec<StableId>,
     changed: Vec<StableId>,
@@ -104,10 +101,20 @@ impl StageDifference {
     /// `reference`, or `None` when they are the same. A set that has no
     /// record of the stage gives `None` in place of the record.
     fn between(
-        stage: StageName,
+        stage: &StageIdentity,
         produced: Option<&Envelope>,
         reference: Option<&Envelope>,
     ) -> Option<Self> {
+        let records = match (produced, reference) {
+            (Some(produced), Some(reference)) => ComparedRecords::Both {
+                produced_payload_version: produced.payload_version(),
+                reference_payload_version: reference.payload_version(),
+            },
+            (Some(_), None) => ComparedRecords::ProducedOnly,
+            (None, Some(_)) => ComparedRecords::ReferenceOnly,
+            // A stage with no record is in neither set.
+            (None, None) => return None,
+        };
         let none = ElementTable::default();
         let produced_elements = produced.map_or(&none, Envelope::elements);
         let reference_elements = reference.map_or(&none, Envelope::elements);
@@ -130,48 +137,49 @@ impl StageDifference {
         };
 
         let difference = Self {
-            module: stage.0.to_owned(),
-            payload_kind: stage.1.to_owned(),
-            produced_payload_version: produced.map(Envelope::payload_version),
-            reference_payload_version: reference.map(Envelope::payload_version),
+            stage: stage.clone(),
+            records,
             added: only_in(produced_elements, reference_elements),
             removed: only_in(reference_elements, produced_elements),
             changed: changed.map(|element| element.id().clone()).collect(),
             roots_reordered: shared_roots(produced_elements, reference_elements)
                 != shared_roots(reference_elements, produced_elements),
         };
-        let same = difference.produced_payload_version == difference.reference_payload_version
-            && difference.added.is_empty()
-            && difference.removed.is_empty()
-            && difference.changed.is_empty()
-            && !difference.roots_reordered;
-        (!same).then_some(difference)
+        (!difference.is_none()).then_some(difference)
+    }
+
+    /// Whether this says that the two records are the same.
+    fn is_none(&self) -> bool {
+        let same_version = match self.records {
+            ComparedRecords::Both {
+                produced_payload_version,
+                reference_payload_version,
+            } => produced_payload_version == reference_payload_version,
+            ComparedRecords::ProducedOnly | ComparedRecords::ReferenceOnly => false,
+        };
+        same_version
+            && self.added.is_empty()
+            && self.removed.is_empty()
+            && self.changed.is_empty()
+            && !self.roots_reordered
     }
 
     /// The module the stage works on.
     #[must_use]
     pub fn module(&self) -> &str {
-        &self.module
+        self.stage.module()
     }
 
     /// The payload kind of what the stage produces.
     #[must_use]
     pub fn payload_kind(&self) -> &str {
-        &self.payload_kind
+        self.stage.payload_kind()
     }
 
-    /// The payload version of the produced record, or `None` when no record
-    /// of the stage was produced: every element is then removed.
+    /// Which of the two record sets have a record of the stage.
     #[must_use]
-    pub fn produced_payload_version(&self) -> Option<u32> {
-        self.produced_payload_version
-    }
-
-    /// The payload version of the reference record, or `None` when the
-    /// stage has no reference record: every element is then added.
-    #[must_use]
-    pub fn reference_payload_version(&self) -> Option<u32> {
-        self.reference_payload_version
+    pub fn records(&self) -> ComparedRecords {
+        self.records
     }
 
     /// The elements that only the produced record has.
@@ -221,43 +229,52 @@ impl fmt::Display for RecordSet {
     }
 }
 
-/// Why two record sets cannot be compared: one of them holds two records of
-/// one stage.
+/// The records of one stage that a Stage test found in its two record sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparedRecords {
+    /// Both sets have a record of the stage.
+    Both {
+        /// The payload version of the produced record.
+        produced_payload_version: u32,
+        /// The payload version of the reference record.
+        reference_payload_version: u32,
+    },
+    /// The stage has no reference record: every element is added.
+    ProducedOnly,
+    /// No record of the stage was produced: every element is removed.
+    ReferenceOnly,
+}
+
+/// Why two record sets cannot be compared.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AmbiguousStage {
-    set: RecordSet,
-    module: String,
-    payload_kind: String,
+#[non_exhaustive]
+pub enum StageTestError {
+    /// One set holds two records of one stage, so nothing says which of the
+    /// two to compare.
+    TwoRecordsOfOneStage {
+        /// The record set that holds the two records.
+        set: RecordSet,
+        /// The module of the stage.
+        module: String,
+        /// The payload kind of the stage.
+        payload_kind: String,
+    },
 }
 
-impl AmbiguousStage {
-    /// The record set that holds the two records.
-    #[must_use]
-    pub fn set(&self) -> RecordSet {
-        self.set
-    }
-
-    /// The module of the stage.
-    #[must_use]
-    pub fn module(&self) -> &str {
-        &self.module
-    }
-
-    /// The payload kind of the stage.
-    #[must_use]
-    pub fn payload_kind(&self) -> &str {
-        &self.payload_kind
-    }
-}
-
-impl fmt::Display for AmbiguousStage {
+impl fmt::Display for StageTestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the {} records hold two `{}` records of module `{}`",
-            self.set, self.payload_kind, self.module
-        )
+        match self {
+            Self::TwoRecordsOfOneStage {
+                set,
+                module,
+                payload_kind,
+            } => write!(
+                f,
+                "the {set} records hold two `{payload_kind}` records of module `{module}`: \
+                 the set holds the records of more than one build"
+            ),
+        }
     }
 }
 
-impl std::error::Error for AmbiguousStage {}
+impl std::error::Error for StageTestError {}

@@ -55,4 +55,4 @@ pub use reason::Reason;
 pub use record::{ReadError, Record, RecordReader, RecordWriter, Untyped, WriteError};
 pub use schema::{Schema, SchemaError, SchemaVersion};
 pub use stage::Stage;
-pub use stage_test::{AmbiguousStage, RecordSet, StageDifference, StageTest};
+pub use stage_test::{ComparedRecords, RecordSet, StageDifference, StageTest, StageTestError};

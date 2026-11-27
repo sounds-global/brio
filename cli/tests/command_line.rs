@@ -478,7 +478,7 @@ fn lens_test_is_an_error_when_a_record_set_is_not_a_directory() {
 
     let output = lens_test(&produced, &reference);
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
@@ -502,7 +502,7 @@ fn lens_test_is_an_error_when_a_record_cannot_be_read() {
 
     let output = lens_test(&produced, &reference);
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
@@ -520,7 +520,7 @@ fn lens_test_is_an_error_when_a_record_set_holds_no_record() {
     // The records directories inside the two build directories.
     let output = lens_test(&produced.join("lens"), &reference.join("lens"));
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
@@ -528,5 +528,24 @@ fn lens_test_is_an_error_when_a_record_set_holds_no_record() {
             "brio: `{}` holds no record\n",
             produced.join("lens").display()
         )
+    );
+}
+
+#[test]
+fn lens_test_is_an_error_when_a_record_set_holds_the_records_of_two_builds() {
+    let sets = record_sets("lens_test_two_builds");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(&reference, "app::main", "0.1.0", &[("a", 1)]);
+    write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
+    write_record(&produced, "app::main", "0.2.0", &[("a", 1)]);
+
+    let output = lens_test(&produced, &reference);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "brio: the produced records hold two `probe` records of module `app::main`: the set \
+         holds the records of more than one build\n"
     );
 }

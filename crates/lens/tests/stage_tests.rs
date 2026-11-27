@@ -7,7 +7,8 @@ mod support;
 
 use brio_lens::json::{Value, json};
 use brio_lens::{
-    Element, ElementTable, Envelope, Payload, PayloadType, Reason, RecordSet, Stage, StageTest,
+    ComparedRecords, Element, ElementTable, Envelope, Payload, PayloadType, Reason, RecordSet,
+    Stage, StageTest, StageTestError,
 };
 
 use support::{
@@ -37,8 +38,9 @@ impl Payload for LaterLoose {
     }
 }
 
-/// The record set of `test` that `set` names: `produced` or `reference`.
-fn set_of(test: &str, set: &str) -> String {
+/// Where the record set `set` of `test` is, as the name of the workspace of
+/// a test.
+fn set_of(test: &str, set: RecordSet) -> String {
     format!("{test}/{set}")
 }
 
@@ -56,7 +58,10 @@ fn write<P: Payload>(set: &str, module: &str, source: &str, payload: &P) {
 /// The empty record sets of `test`: the produced one, then the reference.
 fn record_sets(test: &str) -> (String, String) {
     workspace(test);
-    (set_of(test, "produced"), set_of(test, "reference"))
+    (
+        set_of(test, RecordSet::Produced),
+        set_of(test, RecordSet::Reference),
+    )
 }
 
 /// The Stage test of the record set `produced` against `reference`.
@@ -148,18 +153,16 @@ fn a_stage_with_a_record_in_one_set_alone_differs_even_with_no_element() {
         [stage::<Probe>("app::main").id(&["sensor", "a"])]
     );
     assert_eq!(main.removed(), []);
-    assert_eq!(main.produced_payload_version(), Some(3));
-    assert_eq!(main.reference_payload_version(), None);
+    assert_eq!(main.records(), ComparedRecords::ProducedOnly);
     assert_eq!(motor.module(), "app::motor");
     assert_eq!(motor.added(), []);
-    assert_eq!(motor.reference_payload_version(), None);
+    assert_eq!(motor.records(), ComparedRecords::ProducedOnly);
     assert_eq!(valve.added(), []);
     assert_eq!(
         valve.removed(),
         [stage::<Probe>("app::valve").id(&["sensor", "f"])]
     );
-    assert_eq!(valve.produced_payload_version(), None);
-    assert_eq!(valve.reference_payload_version(), Some(3));
+    assert_eq!(valve.records(), ComparedRecords::ReferenceOnly);
 }
 
 #[test]
@@ -173,8 +176,13 @@ fn a_record_with_another_payload_version_than_its_reference_differs() {
     let [main] = test.differences() else {
         panic!("one stage differs: {:?}", test.differences());
     };
-    assert_eq!(main.produced_payload_version(), Some(2));
-    assert_eq!(main.reference_payload_version(), Some(1));
+    assert_eq!(
+        main.records(),
+        ComparedRecords::Both {
+            produced_payload_version: 2,
+            reference_payload_version: 1
+        }
+    );
     assert_eq!(
         (main.added(), main.removed(), main.changed()),
         (&[][..], &[][..], &[][..])
@@ -261,9 +269,31 @@ fn a_set_with_two_records_of_one_stage_is_not_compared() {
     let error = StageTest::compare(&envelopes(&produced), &envelopes(&reference))
         .expect_err("the reference records are ambiguous");
 
-    assert_eq!(error.set(), RecordSet::Reference);
+    assert_eq!(
+        error,
+        StageTestError::TwoRecordsOfOneStage {
+            set: RecordSet::Reference,
+            module: "app::main".to_owned(),
+            payload_kind: "probe".to_owned()
+        }
+    );
     assert_eq!(
         error.to_string(),
-        "the reference records hold two `probe` records of module `app::main`"
+        "the reference records hold two `probe` records of module `app::main`: the set holds \
+         the records of more than one build"
     );
+}
+
+#[test]
+fn the_comparison_depends_on_no_other_workspace_crate() {
+    // The Lens viewer is a workspace crate, as every phase is: a Stage test
+    // that needed one of them would name it in the manifest of `brio_lens`.
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("the manifest can be read");
+
+    let workspace_crates: Vec<&str> = manifest
+        .lines()
+        .filter(|line| line.starts_with("brio_"))
+        .collect();
+    assert_eq!(workspace_crates, Vec::<&str>::new());
 }
