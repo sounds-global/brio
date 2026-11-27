@@ -13,9 +13,9 @@
 //! with or without knowing their payload types.
 //!
 //! A phase keeps a confidential value out of its records with
-//! [`Element::masked_at`] and [`Reason::masked_at`].
-//! When Lens is off, it hands its records to [`RecordWriter::disabled`],
-//! which drops them and does no work.
+//! [`Element::masked_at`] and [`Reason::masked_at`]. When Lens is off, it
+//! hands its records to [`RecordWriter::disabled`], which drops them and
+//! does no work.
 
 mod canonical;
 mod element;

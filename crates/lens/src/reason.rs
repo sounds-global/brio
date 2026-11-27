@@ -23,10 +23,10 @@ pub struct Reason {
     /// The decision: the phase's name for what it decided, such as
     /// `inferred type`. Never a confidential value: nothing masks it.
     pub decision: String,
-    /// What justifies the decision, in the phase's own form: the candidates
-    /// considered, the constraints, the rule applied. It nests at most
-    /// [`Reason::MAX_DEPTH`] levels.
-    pub because: Value,
+    /// What justifies the decision. It is set when the reason is made and
+    /// never changed after, so a masked marker always names a place where a
+    /// value was masked.
+    because: Value,
     /// The elements the justification is about, such as both accesses of a
     /// rejected borrow. Lens can find them, in any record.
     pub involves: Vec<ElementLink>,
@@ -40,7 +40,9 @@ impl Reason {
     /// back.
     pub const MAX_DEPTH: usize = envelope::MAX_REASON_DEPTH;
 
-    /// The reason for `decision`, justified by `because`.
+    /// The reason for `decision`, justified by `because`: the candidates
+    /// considered, the constraints, the rule applied, in the phase's own
+    /// form. It nests at most [`Reason::MAX_DEPTH`] levels.
     #[must_use]
     pub fn new(decision: &str, because: Value) -> Self {
         Self {
@@ -60,6 +62,21 @@ impl Reason {
     pub fn masked_at(mut self, place: &[&str]) -> Self {
         self.masked.mask(&mut self.because, place);
         self
+    }
+
+    /// This reason, with the value at `place` in its justification masked
+    /// before: the justification holds null there already, as for
+    /// [`Element::still_masked_at`](crate::Element::still_masked_at).
+    #[must_use]
+    pub fn still_masked_at(mut self, place: &[&str]) -> Self {
+        self.masked.keep(&self.because, place);
+        self
+    }
+
+    /// What justifies the decision, in the phase's own form.
+    #[must_use]
+    pub fn because(&self) -> &Value {
+        &self.because
     }
 
     /// Whether the value at `place` in the justification was masked, alone

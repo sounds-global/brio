@@ -278,8 +278,8 @@ fn a_reason_attached_to_a_decision_round_trips_unchanged() {
     };
     assert_eq!(chosen.decision, "alarm");
     assert_eq!(
-        chosen.because,
-        json!({ "rule": "lowest reading", "candidates": { "a": 7, "b": -2 } })
+        chosen.because(),
+        &json!({ "rule": "lowest reading", "candidates": { "a": 7, "b": -2 } })
     );
     assert_eq!(
         chosen.involves,
@@ -309,7 +309,7 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
     );
     let envelopes = envelopes("reason_nesting");
     let read = stage.link(&["a"]).resolve(&envelopes).expect("it is found");
-    assert_eq!(read.reasons()[0].because, nested(122));
+    assert_eq!(read.reasons()[0].because(), &nested(122));
 
     let error = writer
         .write(

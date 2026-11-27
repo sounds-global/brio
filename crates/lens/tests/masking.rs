@@ -169,17 +169,16 @@ fn a_masked_marker_where_no_value_was_masked_is_not_written() {
     });
     assert_eq!(beyond_a_list, misplaced(MaskedPart::Payload, "/01"));
 
-    let put_back = refusal("masked_put_back", |stage| {
-        let mut reason = Reason::new("folded constant", json!({ "folded_to": "hunter2" }))
-            .masked_at(&["folded_to"]);
-        reason.because = json!({ "folded_to": "hunter2" });
+    let put_back = refusal("masked_in_a_reason", |stage| {
+        let reason = Reason::new("folded constant", json!({ "folded_to": "hunter2" }))
+            .masked_at(&["folded", "to"]);
         vec![Element::new(stage.id(&["binding", "token"]), json!("token")).because(reason)]
     });
-    assert_eq!(put_back, misplaced(MaskedPart::Reason, "/folded_to"));
+    assert_eq!(put_back, misplaced(MaskedPart::Reason, "/folded/to"));
     assert_eq!(
         put_back.to_string(),
         format!(
-            "the element `{token}` has a masked marker at `/folded_to` in a reason, where no \
+            "the element `{token}` has a masked marker at `/folded/to` in a reason, where no \
              value was masked"
         )
     );
@@ -234,6 +233,87 @@ fn a_value_masked_with_what_it_is_inside_leaves_one_masked_marker() {
     // What is inside a masked value was masked with it.
     assert!(inside_first.is_masked(&["owner"]));
     assert!(inside_first.is_masked(&["owner", "token"]));
+}
+
+#[test]
+fn a_value_is_masked_whatever_was_asked_of_what_is_inside_it() {
+    // Inside the owner, one value is absent and another is not there at
+    // all. Neither is refused once the owner itself is masked.
+    let element = read_back("masked_around_nothing", |stage| {
+        vec![
+            Element::new(
+                stage.id(&["account"]),
+                json!({ "owner": { "name": "ada", "token": null } }),
+            )
+            .masked_at(&["owner", "token"])
+            .masked_at(&["owner", "missing"])
+            .masked_at(&["owner"]),
+        ]
+    });
+
+    assert_eq!(element.payload(), &json!({ "owner": null }));
+    assert_eq!(element.masked().collect::<Vec<_>>(), ["/owner"]);
+}
+
+#[test]
+fn a_value_that_was_masked_before_stays_masked_in_a_record_made_again() {
+    let first = read_back("masked_first", binding);
+    // What a phase makes from the record it read: the value is gone, and
+    // the place says so.
+    let again = read_back("masked_again", |stage| {
+        vec![
+            Element::new(
+                stage.id(&["binding", "token"]),
+                json!({ "name": "token", "value": null, "unit": null }),
+            )
+            .still_masked_at(&["value"])
+            .because(
+                Reason::new("folded constant", json!({ "folded_to": [null] }))
+                    .still_masked_at(&["folded_to", "0"]),
+            ),
+        ]
+    });
+
+    assert_eq!(again, first);
+    assert!(again.is_masked(&["value"]));
+    assert!(!again.is_masked(&["unit"]));
+}
+
+#[test]
+fn a_value_is_not_written_where_one_is_said_to_be_masked_already() {
+    let token = stage::<Loose>("app::main").id(&["binding", "token"]);
+
+    let in_a_payload = refusal("masked_already_payload", |stage| {
+        vec![
+            Element::new(
+                stage.id(&["binding", "token"]),
+                json!({ "value": "hunter2" }),
+            )
+            .still_masked_at(&["value"]),
+        ]
+    });
+    assert_eq!(
+        in_a_payload,
+        RecordRefusal::MisplacedMaskedMarker {
+            element: token.clone(),
+            part: MaskedPart::Payload,
+            place: "/value".to_owned(),
+        }
+    );
+
+    let in_a_reason = refusal("masked_already_reason", |stage| {
+        let reason = Reason::new("folded constant", json!({ "folded_to": "hunter2" }))
+            .still_masked_at(&["folded_to"]);
+        vec![Element::new(stage.id(&["binding", "token"]), json!("token")).because(reason)]
+    });
+    assert_eq!(
+        in_a_reason,
+        RecordRefusal::MisplacedMaskedMarker {
+            element: token,
+            part: MaskedPart::Reason,
+            place: "/folded_to".to_owned(),
+        }
+    );
 }
 
 #[test]

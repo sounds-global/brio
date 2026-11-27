@@ -72,12 +72,29 @@ impl Element {
     /// names it. What is inside a masked value is masked with it.
     ///
     /// The record writer refuses the record when the payload holds nothing
-    /// at `place`: the value to mask is then somewhere else. Only the payload and the justification of a reason can be
-    /// masked: a confidential value never goes in a stable identifier, in
-    /// the provenance or in the decision of a reason.
+    /// at `place`: the value to mask is then somewhere else. A value that
+    /// was masked before is marked with [`Element::still_masked_at`].
+    ///
+    /// Only the payload and the justification of a reason can be masked: a
+    /// confidential value never goes in a stable identifier, in the
+    /// provenance or in the decision of a reason.
     #[must_use]
     pub fn masked_at(mut self, place: &[&str]) -> Self {
         self.masked.mask(&mut self.payload, place);
+        self
+    }
+
+    /// This element, with the value at `place` in its payload masked
+    /// before: the payload holds null there already.
+    ///
+    /// A phase calls this when it makes an element again from a record it
+    /// read, where the value is gone. `place` is the path that
+    /// [`Element::masked_at`] takes. The record writer refuses the record
+    /// when the payload holds a value at `place`: that value is masked with
+    /// [`Element::masked_at`].
+    #[must_use]
+    pub fn still_masked_at(mut self, place: &[&str]) -> Self {
+        self.masked.keep(&self.payload, place);
         self
     }
 

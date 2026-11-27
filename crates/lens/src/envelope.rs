@@ -258,7 +258,7 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
         });
     }
     for reason in &element.reasons {
-        let depth = canonical::depth(&reason.because);
+        let depth = canonical::depth(reason.because());
         if depth > MAX_REASON_DEPTH {
             return Err(RecordRefusal::ReasonTooDeep {
                 element: element.id.clone(),

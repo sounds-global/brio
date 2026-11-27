@@ -47,8 +47,11 @@ pub(crate) struct MaskedMarkers {
     /// The markers, each the one JSON Pointer of its place. No marker is
     /// inside another.
     markers: BTreeSet<String>,
-    /// The first place a phase asked to mask where there was no value.
-    without_a_value: Option<String>,
+    /// The first place a phase marked where the value was not as it said: it
+    /// asked to mask a value where there was none, or said one was masked
+    /// already where a value is. It is in no record: the record writer
+    /// refuses it.
+    mismarked: Option<String>,
 }
 
 impl MaskedMarkers {
@@ -65,13 +68,38 @@ impl MaskedMarkers {
         match find_mut(value, place) {
             Some(masked) if !masked.is_null() => {
                 *masked = Value::Null;
-                self.markers.retain(|inside| !is_inside(inside, &marker));
-                self.markers.insert(marker);
+                self.mark(marker);
             }
             _ => {
-                self.without_a_value.get_or_insert(marker);
+                self.mismarked.get_or_insert(marker);
             }
         }
+    }
+
+    /// Marks `place`, where the value that `value` held was masked before:
+    /// `value` holds nothing there. A place where it holds a value is
+    /// remembered, and the record writer refuses it.
+    pub(crate) fn keep(&mut self, value: &Value, place: &[&str]) {
+        let marker = pointer_of(place);
+        if self.covers(&marker) {
+            return;
+        }
+        if find(value, place) == Some(&Value::Null) {
+            self.mark(marker);
+        } else {
+            self.mismarked.get_or_insert(marker);
+        }
+    }
+
+    /// Adds `marker`, which takes the place of everything said of what is
+    /// inside it.
+    fn mark(&mut self, marker: String) {
+        let around = |inside: &String| inside == &marker || is_inside(inside, &marker);
+        self.markers.retain(|inside| !around(inside));
+        if self.mismarked.as_ref().is_some_and(around) {
+            self.mismarked = None;
+        }
+        self.markers.insert(marker);
     }
 
     /// Whether the value at `place` was masked, alone or with a value it is
@@ -93,13 +121,13 @@ impl MaskedMarkers {
     }
 
     /// A marker that names a place where no value of `value` was masked:
-    /// there was nothing to mask, there is no such place, or a value is
+    /// the phase marked it wrongly, there is no such place, or a value is
     /// there.
     pub(crate) fn misplaced_in(&self, value: &Value) -> Option<&str> {
         let holds_null = |marker: &&str| {
-            places_of(marker).is_some_and(|place| find(value, &place) == Some(&Value::Null))
+            steps_of(marker).is_some_and(|place| find(value, &place) == Some(&Value::Null))
         };
-        self.without_a_value
+        self.mismarked
             .as_deref()
             .or_else(|| self.markers().find(|marker| !holds_null(marker)))
     }
@@ -117,12 +145,12 @@ impl MaskedMarkers {
             .iter()
             .map(|marker| {
                 let marker = marker.as_str()?;
-                places_of(marker).map(|_| marker.to_owned())
+                steps_of(marker).map(|_| marker.to_owned())
             })
             .collect::<Option<BTreeSet<String>>>()?;
         Some(Self {
             markers,
-            without_a_value: None,
+            mismarked: None,
         })
     }
 }
@@ -135,10 +163,10 @@ fn pointer_of(place: &[&str]) -> String {
         .collect()
 }
 
-/// The place that the JSON Pointer `pointer` names, or `None` when
-/// `pointer` is not a JSON Pointer. A place has one JSON Pointer, so this
-/// reads back exactly what [`pointer_of`] writes.
-fn places_of(pointer: &str) -> Option<Vec<String>> {
+/// The steps of the place that the JSON Pointer `pointer` names, or `None`
+/// when `pointer` is not a JSON Pointer. A place has one JSON Pointer, so
+/// this reads back exactly what [`pointer_of`] writes.
+fn steps_of(pointer: &str) -> Option<Vec<String>> {
     if pointer.is_empty() {
         return Some(Vec::new());
     }
