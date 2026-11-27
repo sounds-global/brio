@@ -85,26 +85,25 @@ fn record_key_of(file: &Path) -> Option<RecordKey> {
     RecordKey::from_hex(key.to_owned())
 }
 
-/// Where the writer `writer` of this process keeps the record with `key`
-/// until it is complete. The name is that writer's alone.
-fn unfinished_path(records_directory: &Path, key: &RecordKey, writer: u64) -> PathBuf {
-    let process = std::process::id();
-    records_directory.join(format!("{key}.{process}-{writer}{UNFINISHED_SUFFIX}"))
+/// The name of the file where the writer `writer` of the process `process`
+/// keeps the record with `key` until it is complete. The name is that
+/// writer's alone.
+fn unfinished_name(key: &RecordKey, process: u32, writer: u64) -> String {
+    format!("{key}.{process}-{writer}{UNFINISHED_SUFFIX}")
 }
 
-/// Whether `file` is named as [`unfinished_path`] names a record that a
-/// writer, of any process, has not finished.
-fn is_unfinished(file: &Path) -> bool {
-    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    let name = file.file_name().and_then(|name| name.to_str());
-    name.and_then(|name| name.strip_suffix(UNFINISHED_SUFFIX))
-        .and_then(|name| name.rsplit_once('.'))
-        .is_some_and(|(key, writer)| {
-            let numbered = writer
-                .split_once('-')
-                .is_some_and(|(process, writer)| is_number(process) && is_number(writer));
-            numbered && RecordKey::from_hex(key.to_owned()).is_some()
-        })
+/// Whether `name` is a name that [`unfinished_name`] gives: the name of a
+/// record that a writer, of any process, has not finished.
+fn is_unfinished_name(name: &str) -> bool {
+    let parts = || {
+        let (key, numbers) = name.strip_suffix(UNFINISHED_SUFFIX)?.rsplit_once('.')?;
+        let (process, writer) = numbers.split_once('-')?;
+        let key = RecordKey::from_hex(key.to_owned())?;
+        Some((key, process.parse().ok()?, writer.parse().ok()?))
+    };
+    // The name is recognised by making it again, so the writer and the
+    // reader cannot come to name it differently.
+    parts().is_some_and(|(key, process, writer)| unfinished_name(&key, process, writer) == name)
 }
 
 /// Writes records into a build directory, or, when Lens is off, drops them.
@@ -177,11 +176,11 @@ impl RecordWriter {
         // name only once it is complete. Its name until then is its
         // writer's alone, so two writers of one record never share it.
         static WRITES: AtomicU64 = AtomicU64::new(0);
-        let unfinished = unfinished_path(
-            directory,
+        let unfinished = directory.join(unfinished_name(
             envelope.key(),
+            std::process::id(),
             WRITES.fetch_add(1, Ordering::Relaxed),
-        );
+        ));
         fs::create_dir_all(directory)
             .and_then(|()| fs::write(&unfinished, text))
             .and_then(|()| fs::rename(&unfinished, &path))
@@ -293,12 +292,17 @@ impl RecordReader {
 
     /// Every record in the build directory, each with an untyped payload, in
     /// the order of their file names. A record that cannot be read is given
-    /// as its error, in its place, and hides no other record. So is anything
-    /// else among the records of the build directory that is not named as a
-    /// record, as [`RecordDefect::Misnamed`]: a reader is never given the
-    /// records of a build directory with one missing as if they were whole.
+    /// as its error, in its place, and hides no other record.
+    ///
+    /// So is anything else among the records of the build directory, as
+    /// [`ReadError::NotARecord`]: a file with another name than a record
+    /// has, a hidden file, a directory. A reader is never given the records
+    /// of a build directory with one missing as if they were whole, so
+    /// nothing is kept beside the records, not even a `.gitkeep`.
+    ///
     /// Only a record its writer has not finished is passed over: it is no
-    /// record yet.
+    /// record yet. It is known by its name alone, so a record renamed to
+    /// such a name is passed over too.
     ///
     /// This reads records of any payload kind, including those of payload
     /// types the caller does not know. It does not know the inputs of any
@@ -318,18 +322,21 @@ impl RecordReader {
         };
         let mut paths = Vec::new();
         for entry in fs::read_dir(&self.directory).map_err(io_error)? {
-            let path = entry.map_err(io_error)?.path();
-            if !is_unfinished(&path) {
-                paths.push(path);
+            let entry = entry.map_err(io_error)?;
+            // A writer keeps an unfinished record in a file: a directory or
+            // a link with such a name is not one. A file that is gone
+            // before its type is known was one, finished since.
+            let unfinished = entry.file_name().to_str().is_some_and(is_unfinished_name)
+                && entry.file_type().map_or(true, |kind| kind.is_file());
+            if !unfinished {
+                paths.push(entry.path());
             }
         }
         paths.sort();
 
         let read = |path: &PathBuf| {
-            let key = record_key_of(path).ok_or_else(|| ReadError::Defective {
-                path: path.clone(),
-                defect: RecordDefect::Misnamed,
-            })?;
+            let key =
+                record_key_of(path).ok_or_else(|| ReadError::NotARecord { path: path.clone() })?;
             read_record(path, &key)
         };
         Ok(paths.iter().map(read).collect())
@@ -372,6 +379,12 @@ pub enum ReadError {
         /// What the file system reported.
         error: io::Error,
     },
+    /// Something among the records of a build directory is not named for a
+    /// record key, as every record is, so it is not read as a record.
+    NotARecord {
+        /// The file or directory.
+        path: PathBuf,
+    },
     /// The file does not hold a record this toolchain trusts.
     Defective {
         /// The file of the record.
@@ -410,6 +423,11 @@ impl fmt::Display for ReadError {
                 "there is no `{payload_kind}` record of module `{module}` for these inputs"
             ),
             Self::Io { path, error } => write!(f, "`{}` cannot be read: {error}", path.display()),
+            Self::NotARecord { path } => write!(
+                f,
+                "`{}` is among the records and is not named for a record key",
+                path.display()
+            ),
             Self::Defective { path, defect } => {
                 write!(f, "the record `{}` {defect}", path.display())
             }

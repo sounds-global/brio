@@ -489,15 +489,25 @@ fn a_record_that_cannot_be_read_hides_no_other_record() {
         .map(|record| record.envelope.payload_kind())
         .collect();
     assert_eq!(whole, ["gauge"]);
-    let mut defects: Vec<&RecordDefect> = records
-        .iter()
-        .filter_map(|record| match record {
-            Err(ReadError::Defective { defect, .. }) => Some(defect),
-            _ => None,
-        })
-        .collect();
-    defects.sort_by_key(|defect| **defect == RecordDefect::Misnamed);
-    assert_eq!(defects, [&RecordDefect::Corrupted, &RecordDefect::Misnamed]);
+    let count = |unread: fn(&ReadError) -> bool| {
+        let errors = records.iter().filter_map(|record| record.as_ref().err());
+        errors.filter(|error| unread(error)).count()
+    };
+    let corrupted = count(|error| {
+        matches!(
+            error,
+            ReadError::Defective {
+                defect: RecordDefect::Corrupted,
+                ..
+            }
+        )
+    });
+    assert_eq!(corrupted, 1);
+    assert_eq!(
+        count(|error| matches!(error, ReadError::NotARecord { .. })),
+        1
+    );
+    assert_eq!(records.len(), 3);
 }
 
 /// A payload of one element, whose payload is arrays nested inside each
@@ -952,32 +962,20 @@ fn a_file_that_is_not_named_as_a_record_is_given_as_an_error_and_hides_no_other_
     // Each file gives a record or an error, in the order of the file names.
     let mut files = files_under(&build_directory);
     files.sort();
-    assert_eq!(records.len(), 3);
-    for (file, record) in files.iter().zip(&records) {
-        match record {
-            Ok(record) => {
-                assert_eq!(record.envelope.payload_kind(), "gauge");
-                assert!(*file != misnamed && *file != foreign);
-            }
-            Err(ReadError::Defective {
-                path,
-                defect: RecordDefect::Misnamed,
-            }) => {
-                assert_eq!(path, file);
-                assert!(*file == misnamed || *file == foreign);
-            }
-            Err(other) => panic!("`{}` is read in an unexpected way: {other}", file.display()),
-        }
-    }
-    let error = records
+    let expected: Vec<Option<&PathBuf>> = files
         .iter()
-        .find_map(|record| record.as_ref().err())
-        .expect("a file is not a record");
-    assert!(
-        error
-            .to_string()
-            .ends_with("` is not named for a record key")
-    );
+        .map(|file| (*file == misnamed || *file == foreign).then_some(file))
+        .collect();
+    let not_records: Vec<Option<&PathBuf>> = records
+        .iter()
+        .map(|record| match record {
+            Err(ReadError::NotARecord { path }) => Some(path),
+            Ok(_) => None,
+            Err(other) => panic!("a file is read in an unexpected way: {other}"),
+        })
+        .collect();
+    assert_eq!(not_records, expected);
+    assert_eq!(not_records.iter().flatten().count(), 2);
 }
 
 #[test]
@@ -1010,23 +1008,57 @@ fn a_file_named_as_unfinished_that_no_writer_made_is_given_as_an_error() {
         &inputs("sensor a\n"),
         &probe(&[("a", 7)]),
     );
-    let renamed = path.with_extension("unfinished");
-    fs::rename(&path, &renamed).expect("the record can be renamed");
-    let foreign = path.with_file_name("notes.4242-0.unfinished");
-    fs::write(&foreign, "not a record\n").expect("a foreign file can be added");
+    fs::rename(&path, path.with_extension("unfinished")).expect("the record can be renamed");
+    for (name, text) in [
+        ("notes.4242-0.unfinished", "not a record\n"),
+        ("4242-0.unfinished", ""),
+    ] {
+        fs::write(path.with_file_name(name), text).expect("a foreign file can be added");
+    }
+    // No process has so high a number, and no writer keeps a directory.
+    fs::write(path.with_extension("99999999999-0.unfinished"), "")
+        .expect("a foreign file can be added");
+    fs::create_dir(path.with_extension("4242-1.unfinished")).expect("a directory can be added");
 
     let records = RecordReader::in_build_directory(&build_directory)
         .read_all()
         .expect("the records are read");
 
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 5);
     for record in &records {
-        assert!(matches!(
-            record,
-            Err(ReadError::Defective {
-                defect: RecordDefect::Misnamed,
-                ..
-            })
-        ));
+        assert!(matches!(record, Err(ReadError::NotARecord { .. })));
     }
+}
+
+#[test]
+fn a_reader_beside_writers_is_given_no_error() {
+    let build_directory = workspace("reader_beside_writers").join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+
+    let write_often = || {
+        for _ in 0..200 {
+            write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+        }
+    };
+    let read_often = || {
+        let reader = RecordReader::in_build_directory(&build_directory);
+        for _ in 0..200 {
+            let records = reader.read_all().expect("the records are read");
+            // What a writer has not finished is never taken for a record,
+            // or for a file that is not one.
+            let errors: Vec<&ReadError> = records
+                .iter()
+                .filter_map(|record| record.as_ref().err())
+                .collect();
+            assert!(errors.is_empty(), "{errors:?}");
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(write_often);
+        }
+        scope.spawn(read_often);
+    });
 }

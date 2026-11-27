@@ -452,9 +452,6 @@ pub enum RecordDefect {
     /// The record was computed from other inputs than those of the record
     /// key it is stored under.
     Stale,
-    /// The file is among the records of a build directory and is not named
-    /// for a record key, so it is stored as no record is.
-    Misnamed,
     /// The record has an envelope version this toolchain does not read.
     UnsupportedEnvelopeVersion {
         /// The envelope version of the record.
@@ -469,7 +466,6 @@ impl fmt::Display for RecordDefect {
         match self {
             Self::Corrupted => f.write_str("is corrupted"),
             Self::Stale => f.write_str("is stale: it was computed from other inputs"),
-            Self::Misnamed => f.write_str("is not named for a record key"),
             Self::UnsupportedEnvelopeVersion { found, supported } => write!(
                 f,
                 "has envelope version {found}, but this toolchain reads envelope version \

@@ -550,17 +550,19 @@ fn lens_test_is_an_error_when_a_record_set_holds_the_records_of_two_builds() {
 fn lens_test_is_an_error_when_a_record_is_misnamed_in_both_record_sets() {
     let sets = record_sets("lens_test_misnamed");
     let (produced, reference) = (sets.join("produced"), sets.join("reference"));
-    // The misnamed record of each set, with another value in each.
-    let misname = |set: &Path, value: i64| {
+    // The record of one stage differs between the sets, and is misnamed in
+    // both.
+    let misnamed_record = |set: &Path, value: i64| {
         let record = write_record(set, "app::main", "0.1.0", &[("a", value)]);
         let misnamed = record.with_extension("JSON");
         fs::rename(&record, &misnamed).expect("the record can be renamed");
-        // Another stage, the same in both sets.
-        write_record(set, "app::motor", "0.1.0", &[("e", 1)]);
         misnamed
     };
-    let misnamed = misname(&produced, 1);
-    misname(&reference, 2);
+    let misnamed = misnamed_record(&produced, 1);
+    misnamed_record(&reference, 2);
+    // Another stage, the same in both sets.
+    write_record(&produced, "app::motor", "0.1.0", &[("e", 1)]);
+    write_record(&reference, "app::motor", "0.1.0", &[("e", 1)]);
 
     let output = lens_test(&produced, &reference);
 
@@ -569,7 +571,7 @@ fn lens_test_is_an_error_when_a_record_is_misnamed_in_both_record_sets() {
     assert_eq!(
         stderr(&output),
         format!(
-            "brio: the record `{}` is not named for a record key\n",
+            "brio: `{}` is among the records and is not named for a record key\n",
             misnamed.display()
         )
     );
