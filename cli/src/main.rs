@@ -2,6 +2,7 @@
 
 //! The `brio` command.
 
+use std::error::Error;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
@@ -32,8 +33,16 @@ enum LensCommand {
 }
 
 fn main() -> ExitCode {
-    match Brio::parse().command {
+    let outcome = match Brio::parse().command {
         Command::Lens(LensCommand::Schema) => lens_schema(),
+    };
+
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("brio: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -45,20 +54,8 @@ fn linked_payloads() -> Vec<PayloadSchema> {
 }
 
 /// `brio lens schema`: prints the published record schema.
-fn lens_schema() -> ExitCode {
-    let schema = match Schema::assemble(linked_payloads()) {
-        Ok(schema) => schema,
-        Err(error) => {
-            eprintln!("brio: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    match io::stdout().write_all(schema.to_json().as_bytes()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("brio: cannot write the schema: {error}");
-            ExitCode::FAILURE
-        }
-    }
+fn lens_schema() -> Result<(), Box<dyn Error>> {
+    let schema = Schema::assemble(linked_payloads())?;
+    io::stdout().write_all(schema.to_json().as_bytes())?;
+    Ok(())
 }

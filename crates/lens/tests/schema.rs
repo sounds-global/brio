@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 struct Probe;
 
 impl Payload for Probe {
-    const STAGE_KIND: &'static str = "probe";
+    const KIND: &'static str = "probe";
     const VERSION: u32 = 3;
 
     fn schema_fragment() -> Value {
@@ -25,7 +25,7 @@ impl Payload for Probe {
 fn assembled_schema_includes_the_payload_fragment_and_the_combined_version() {
     let schema = Schema::assemble([PayloadSchema::of::<Probe>()]).expect("one payload assembles");
 
-    assert_eq!(schema.version(), "1+probe.3");
+    assert_eq!(schema.version().to_string(), "1+probe.3");
 
     let document: Value = serde_json::from_str(&schema.to_json()).expect("the schema is JSON");
     assert_eq!(document["version"], "1+probe.3");
@@ -49,7 +49,7 @@ fn assembled_schema_includes_the_payload_fragment_and_the_combined_version() {
 struct Gauge;
 
 impl Payload for Gauge {
-    const STAGE_KIND: &'static str = "gauge";
+    const KIND: &'static str = "gauge";
     const VERSION: u32 = 1;
 
     fn schema_fragment() -> Value {
@@ -64,16 +64,16 @@ fn the_same_payload_set_gives_byte_identical_output_in_any_order() {
     let other_way = Schema::assemble([PayloadSchema::of::<Gauge>(), PayloadSchema::of::<Probe>()])
         .expect("two payloads assemble");
 
-    assert_eq!(one_way.version(), "1+gauge.1+probe.3");
-    assert_eq!(other_way.version(), "1+gauge.1+probe.3");
+    assert_eq!(one_way.version().to_string(), "1+gauge.1+probe.3");
+    assert_eq!(other_way.version().to_string(), "1+gauge.1+probe.3");
     assert_eq!(one_way.to_json(), other_way.to_json());
 }
 
-/// A payload that claims the stage kind of [`Probe`].
+/// A payload that claims the payload kind of [`Probe`].
 struct Impostor;
 
 impl Payload for Impostor {
-    const STAGE_KIND: &'static str = "probe";
+    const KIND: &'static str = "probe";
     const VERSION: u32 = 9;
 
     fn schema_fragment() -> Value {
@@ -82,21 +82,75 @@ impl Payload for Impostor {
 }
 
 #[test]
-fn two_payloads_of_one_stage_kind_do_not_assemble() {
+fn two_payloads_of_one_payload_kind_do_not_assemble() {
     let error = Schema::assemble([
         PayloadSchema::of::<Probe>(),
         PayloadSchema::of::<Impostor>(),
     ])
-    .expect_err("one stage kind cannot have two payloads");
+    .expect_err("one payload kind cannot have two payloads");
 
     assert_eq!(
         error,
-        SchemaError::DuplicateStageKind {
-            stage_kind: "probe"
+        SchemaError::DuplicatePayloadKind {
+            payload_kind: "probe"
         }
     );
     assert_eq!(
         error.to_string(),
-        "two payloads declare the stage kind `probe`"
+        "two payloads declare the payload kind `probe`"
+    );
+}
+
+/// A payload whose fragment declares its keys out of order.
+struct Label;
+
+impl Payload for Label {
+    const KIND: &'static str = "label";
+    const VERSION: u32 = 1;
+
+    fn schema_fragment() -> Value {
+        json!({ "type": "string", "minLength": 1, "description": "A label." })
+    }
+}
+
+#[test]
+fn object_keys_are_written_in_sorted_order_whatever_order_a_fragment_declares() {
+    let schema = Schema::assemble([PayloadSchema::of::<Label>()]).expect("one payload assembles");
+
+    let json = schema.to_json();
+    let fragment = &json[json
+        .find(r#""payload": {"#)
+        .expect("the fragment is published")..];
+    let position = |key: &str| fragment.find(key).expect("the fragment has this key");
+    assert!(position(r#""description""#) < position(r#""minLength""#));
+    assert!(position(r#""minLength""#) < position(r#""type""#));
+}
+
+/// A payload whose kind would make a schema version ambiguous.
+struct Dotted;
+
+impl Payload for Dotted {
+    const KIND: &'static str = "probe.3+gauge";
+    const VERSION: u32 = 1;
+
+    fn schema_fragment() -> Value {
+        json!({ "type": "null" })
+    }
+}
+
+#[test]
+fn a_payload_kind_with_other_than_lowercase_letters_digits_and_underscores_does_not_assemble() {
+    let error = Schema::assemble([PayloadSchema::of::<Dotted>()])
+        .expect_err("the kind would read as two payloads in the version");
+
+    assert_eq!(
+        error,
+        SchemaError::InvalidPayloadKind {
+            payload_kind: "probe.3+gauge"
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "the payload kind `probe.3+gauge` has characters other than lowercase letters, digits and `_`"
     );
 }

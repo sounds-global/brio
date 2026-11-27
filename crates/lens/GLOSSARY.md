@@ -16,6 +16,14 @@ _Avoid_: dump, trace, snapshot
 A replayable recording of one run under the interpreter or simulator, steppable forward and backward.
 _Avoid_: trace, log
 
+**Payload**:
+The part of a record that one phase defines in its own types: what that phase produced, or what a run did. Everything else in the record is shared by all phases.
+_Avoid_: body, content
+
+**Payload kind**:
+The name that identifies one payload type in every record and in the published schema, such as `tokens`. Unique within a toolchain.
+_Avoid_: stage kind, record type
+
 **Provenance**:
 The links from an element of a **Stage record** back to the source text and to the elements of the previous stage it derives from.
 _Avoid_: lineage, ancestry

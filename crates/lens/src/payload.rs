@@ -9,11 +9,12 @@ use serde_json::Value;
 /// `brio_lens` knows no payload type: a phase crate implements this trait for
 /// its own types.
 pub trait Payload {
-    /// The kind of stage this payload records, such as `"tokens"`.
+    /// The payload kind: the name of this payload type, such as `"tokens"`.
     ///
     /// It identifies the payload in every record and in the published schema,
-    /// so it is unique among the payloads linked into one toolchain.
-    const STAGE_KIND: &'static str;
+    /// so it is unique among the payloads linked into one toolchain. It is
+    /// made of lowercase ASCII letters, digits and `_`.
+    const KIND: &'static str;
 
     /// The version of this payload's format, owned by the phase.
     const VERSION: u32;
@@ -26,9 +27,9 @@ pub trait Payload {
 ///
 /// This is what schema assembly takes: a tool that links several phases
 /// collects one of these for each payload type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct PayloadSchema {
-    pub(crate) stage_kind: &'static str,
+    pub(crate) kind: &'static str,
     pub(crate) version: u32,
     pub(crate) fragment: Value,
 }
@@ -38,7 +39,7 @@ impl PayloadSchema {
     #[must_use]
     pub fn of<P: Payload>() -> Self {
         Self {
-            stage_kind: P::STAGE_KIND,
+            kind: P::KIND,
             version: P::VERSION,
             fragment: P::schema_fragment(),
         }

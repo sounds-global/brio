@@ -9,4 +9,4 @@ mod payload;
 mod schema;
 
 pub use payload::{Payload, PayloadSchema};
-pub use schema::{ENVELOPE_VERSION, Schema, SchemaError};
+pub use schema::{Schema, SchemaError, SchemaVersion};

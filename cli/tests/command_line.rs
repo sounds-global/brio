@@ -39,13 +39,21 @@ fn brio(arguments: &[&str]) -> Output {
         .expect("the brio binary runs")
 }
 
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 #[test]
 fn lens_schema_prints_the_envelope_schema_with_its_version() {
     let output = brio(&["lens", "schema"]);
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), ENVELOPE_SCHEMA);
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(stdout(&output), ENVELOPE_SCHEMA);
+    assert_eq!(stderr(&output), "");
 }
 
 #[test]
@@ -63,17 +71,20 @@ fn an_unknown_command_is_a_usage_error_that_names_it() {
     let output = brio(&["lens", "polish"]);
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("polish"));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("polish"));
 }
 
 #[test]
-fn no_command_is_a_usage_error_that_lists_the_commands() {
+fn no_command_is_a_usage_error_that_prints_the_full_help() {
     let output = brio(&[]);
+    let help = brio(&["--help"]);
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("lens"));
+    assert_eq!(stdout(&output), "");
+    assert!(help.status.success());
+    assert!(!help.stdout.is_empty());
+    assert_eq!(stderr(&output), stdout(&help));
 }
 
 #[test]
@@ -82,7 +93,7 @@ fn version_prints_the_toolchain_version() {
 
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        stdout(&output),
         concat!("brio ", env!("CARGO_PKG_VERSION"), "\n")
     );
 }
