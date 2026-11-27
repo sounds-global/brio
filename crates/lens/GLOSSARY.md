@@ -77,5 +77,17 @@ The record writer of a build with **Lens** off. It drops every record and does n
 _Avoid_: null writer, no-op writer
 
 **Stage test**:
-A comparison of a test program's **Stage records** against reviewed reference records.
+A comparison of a test program's **Stage records** against reviewed reference records: a set of **Produced records** against a set of **Reference records**.
 _Avoid_: snapshot test, golden test
+
+**Record set**:
+The records on one side of a **Stage test**, with at most one record of each **Stage**. A test has two: the **Produced records** and the **Reference records**.
+_Avoid_: record collection, snapshot directory
+
+**Produced record**:
+A record that a build wrote and a **Stage test** checks.
+_Avoid_: actual record, output record
+
+**Reference record**:
+A reviewed record that the **Produced record** of the same **Stage** is compared against. The two have the same module and **Payload kind**, and may have different **Record keys**.
+_Avoid_: golden record, expected record, baseline

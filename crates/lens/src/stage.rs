@@ -22,7 +22,10 @@ pub(crate) const PAYLOAD_KIND: &str = "payload_kind";
 ///
 /// One is only ever made of a module and a payload kind that a stage can
 /// have, so the rule on both is applied once, here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Identities are in the order of their modules, then of their payload
+/// kinds.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct StageIdentity {
     module: String,
     payload_kind: String,

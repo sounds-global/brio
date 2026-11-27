@@ -16,6 +16,10 @@
 //! [`Element::masked_at`] and [`Reason::masked_at`]. When Lens is off, it
 //! hands its records to [`RecordWriter::disabled`], which drops them and
 //! does no work.
+//!
+//! A [`StageTest`] compares the records a build produced against reviewed
+//! reference records, and says what was added, removed and changed in each
+//! stage.
 
 mod canonical;
 mod element;
@@ -31,6 +35,7 @@ mod reason;
 mod record;
 mod schema;
 mod stage;
+mod stage_test;
 
 /// The JSON model of Lens: the types a schema fragment and a payload are
 /// written in.
@@ -50,3 +55,4 @@ pub use reason::Reason;
 pub use record::{ReadError, Record, RecordReader, RecordWriter, Untyped, WriteError};
 pub use schema::{Schema, SchemaError, SchemaVersion};
 pub use stage::Stage;
+pub use stage_test::{ComparedRecords, RecordSet, StageDifference, StageTest, StageTestError};

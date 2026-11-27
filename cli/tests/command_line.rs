@@ -2,7 +2,13 @@
 
 //! The `brio` command line, run as a process.
 
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use brio_lens::json::{Value, json};
+use brio_lens::{Element, ElementTable, Payload, PayloadType, RecordInputs, RecordWriter, Stage};
 
 /// The published schema while no phase is linked: the envelope alone.
 const ENVELOPE_SCHEMA: &str = r##"{
@@ -340,5 +346,206 @@ fn version_prints_the_toolchain_version() {
     assert_eq!(
         stdout(&output),
         concat!("brio ", env!("CARGO_PKG_VERSION"), "\n")
+    );
+}
+
+/// A payload no phase owns: the reading of every sensor a module declares.
+struct Probe(Vec<(&'static str, i64)>);
+
+impl PayloadType for Probe {
+    const KIND: &'static str = "probe";
+    const VERSION: u32 = 1;
+
+    fn schema_fragment() -> Value {
+        json!({ "type": "integer" })
+    }
+}
+
+impl Payload for Probe {
+    fn to_elements(&self, stage: &Stage<Self>) -> Vec<Element> {
+        let reading = |(sensor, value): &(&str, i64)| {
+            Element::new(stage.id(&["sensor", sensor]), json!(value))
+        };
+        self.0.iter().map(reading).collect()
+    }
+
+    fn from_elements(_elements: &ElementTable) -> Option<Self> {
+        None
+    }
+}
+
+/// The probe stage of `module`.
+fn probe_stage(module: &str) -> Stage<Probe> {
+    Stage::of(module).expect("the payload kind and the module are valid")
+}
+
+/// An empty directory for the record sets of the test called `test`.
+fn record_sets(test: &str) -> PathBuf {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
+    if directory.exists() {
+        fs::remove_dir_all(&directory).expect("the old record sets can be removed");
+    }
+    fs::create_dir_all(&directory).expect("the directory can be created");
+    directory
+}
+
+/// Writes into the record set in `directory` the record of what the probe
+/// stage produced for `module`, with the toolchain `toolchain_version`.
+fn write_record(
+    directory: &Path,
+    module: &str,
+    toolchain_version: &str,
+    sensors: &[(&'static str, i64)],
+) {
+    let inputs = RecordInputs {
+        module_inputs: BTreeMap::new(),
+        toolchain_version: toolchain_version.to_owned(),
+        target: "aarch64-unknown-linux-gnu".to_owned(),
+        build_settings: BTreeMap::new(),
+    };
+    RecordWriter::in_build_directory(directory)
+        .write(&probe_stage(module), || &inputs, &Probe(sensors.to_vec()))
+        .expect("the record is written");
+}
+
+fn lens_test(produced: &Path, reference: &Path) -> Output {
+    let path = |directory: &Path| directory.to_str().expect("the path is text").to_owned();
+    brio(&["lens", "test", &path(produced), &path(reference)])
+}
+
+#[test]
+fn lens_test_succeeds_and_prints_nothing_when_the_record_sets_match() {
+    let sets = record_sets("lens_test_match");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(&reference, "app::main", "0.1.0", &[("a", 1), ("b", 2)]);
+    write_record(&produced, "app::main", "0.2.0", &[("a", 1), ("b", 2)]);
+
+    let output = lens_test(&produced, &reference);
+
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn lens_test_fails_and_prints_each_differing_stage_and_element() {
+    let sets = record_sets("lens_test_differ");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(
+        &reference,
+        "app::main",
+        "0.1.0",
+        &[("a", 1), ("b", 2), ("c", 3)],
+    );
+    write_record(
+        &produced,
+        "app::main",
+        "0.1.0",
+        &[("a", 1), ("b", 5), ("d", 4)],
+    );
+    write_record(&reference, "app::motor", "0.1.0", &[("e", 1)]);
+    write_record(&produced, "app::motor", "0.1.0", &[("e", 1)]);
+    write_record(&produced, "app::valve", "0.1.0", &[("f", 1)]);
+
+    let output = lens_test(&produced, &reference);
+
+    let main = probe_stage("app::main");
+    let valve = probe_stage("app::valve");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "the `probe` record of module `app::main` differs from its reference record:\n\
+             \x20 added: {}\n\
+             \x20 removed: {}\n\
+             \x20 changed: {}\n\
+             the `probe` record of module `app::valve` has no reference record:\n\
+             \x20 added: {}\n",
+            main.id(&["sensor", "d"]),
+            main.id(&["sensor", "c"]),
+            main.id(&["sensor", "b"]),
+            valve.id(&["sensor", "f"]),
+        )
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn lens_test_is_an_error_when_a_record_set_is_not_a_directory() {
+    let sets = record_sets("lens_test_no_directory");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
+
+    let output = lens_test(&produced, &reference);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!("brio: `{}` is not a directory\n", reference.display())
+    );
+}
+
+#[test]
+fn lens_test_is_an_error_when_a_record_cannot_be_read() {
+    let sets = record_sets("lens_test_corrupted");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(&reference, "app::main", "0.1.0", &[("a", 1)]);
+    write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
+    let record = fs::read_dir(produced.join("lens"))
+        .expect("the records can be listed")
+        .next()
+        .expect("the set has a record")
+        .expect("the record can be listed")
+        .path();
+    fs::write(&record, "{}\n").expect("the record can be changed");
+
+    let output = lens_test(&produced, &reference);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!("brio: the record `{}` is corrupted\n", record.display())
+    );
+}
+
+#[test]
+fn lens_test_is_an_error_when_a_record_set_holds_no_record() {
+    let sets = record_sets("lens_test_no_record");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
+    write_record(&reference, "app::main", "0.1.0", &[("a", 2)]);
+
+    // The records directories inside the two build directories.
+    let output = lens_test(&produced.join("lens"), &reference.join("lens"));
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "brio: `{}` holds no record\n",
+            produced.join("lens").display()
+        )
+    );
+}
+
+#[test]
+fn lens_test_is_an_error_when_a_record_set_holds_the_records_of_two_builds() {
+    let sets = record_sets("lens_test_two_builds");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    write_record(&reference, "app::main", "0.1.0", &[("a", 1)]);
+    write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
+    write_record(&produced, "app::main", "0.2.0", &[("a", 1)]);
+
+    let output = lens_test(&produced, &reference);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "brio: the produced records hold two `probe` records of module `app::main`: the set \
+         holds the records of more than one build\n"
     );
 }
