@@ -17,6 +17,11 @@
 //! hands its records to [`RecordWriter::disabled`], which drops them and
 //! does no work.
 //!
+//! Any number of processes read and write the records of one build
+//! directory at once: they keep out of each other's way with the Records
+//! lock, a file beside the records that [`RecordWriter::in_build_directory`]
+//! describes.
+//!
 //! A [`StageTest`] compares the records a build produced against reviewed
 //! reference records, and says what was added, removed and changed in each
 //! stage.
@@ -28,6 +33,7 @@ mod fields;
 mod hash;
 mod identity;
 mod inputs;
+mod lock;
 mod mask;
 mod payload;
 mod provenance;

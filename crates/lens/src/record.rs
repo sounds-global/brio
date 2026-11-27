@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::envelope::{RecordDefect, RecordRefusal};
 use crate::payload::Payload;
-use crate::{Envelope, RecordInputs, RecordKey, Stage};
+use crate::{Envelope, RecordInputs, RecordKey, Stage, lock};
 
 /// A record: the envelope, and the payload it wraps.
 ///
@@ -257,6 +257,18 @@ enum Records {
 
 impl RecordWriter {
     /// A writer of records into `build_directory`. It writes nowhere else.
+    ///
+    /// The records are in the directory `lens` of the build directory, each
+    /// in a file named for its record key. Beside that directory the writer
+    /// makes the file `lens.lock`, the Records lock, before it changes
+    /// anything among the records, and holds it shared while it writes each
+    /// record that is not there already. Another tool that reads or writes the records of a
+    /// build directory locks that file too: shared to list the records or
+    /// to make a new one, exclusive to be alone at work among them.
+    ///
+    /// The writer does not take the exclusive lock yet: it still puts a
+    /// record in the place of a file with other bytes, such as a corrupted
+    /// record, under the shared lock.
     #[must_use]
     pub fn in_build_directory(build_directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -293,6 +305,7 @@ impl RecordWriter {
     /// # Errors
     ///
     /// Fails when Lens refuses to make the record, for a [`RecordRefusal`],
+    /// when the lock file of the records is not there and cannot be made,
     /// or when the file cannot be written. The disabled writer never fails.
     pub fn write<P: Payload, I: Borrow<RecordInputs>>(
         &self,
@@ -314,10 +327,18 @@ impl RecordWriter {
             text: &text,
         };
         if !record.is_there() {
-            write_record(directory, envelope.key(), &record).map_err(|error| WriteError::Io {
-                path: path.clone(),
-                error,
-            })?;
+            // The lock is held for this record alone, for as long as its
+            // unfinished record exists.
+            let write = || write_record(directory, envelope.key(), &record);
+            lock::while_making_a_record(directory, write)
+                .map_err(|error| WriteError::LockFile {
+                    path: lock::lock_file(directory),
+                    error,
+                })?
+                .map_err(|error| WriteError::Io {
+                    path: path.clone(),
+                    error,
+                })?;
         }
         Ok(Some(path))
     }
@@ -336,6 +357,15 @@ pub enum WriteError {
         /// What the file system reported.
         error: io::Error,
     },
+    /// The lock file of the records, the Records lock, is not there and
+    /// could not be made, so nothing was written: a writer never works
+    /// among records that have no lock file.
+    LockFile {
+        /// The lock file.
+        path: PathBuf,
+        /// What the file system reported.
+        error: io::Error,
+    },
 }
 
 impl fmt::Display for WriteError {
@@ -349,6 +379,11 @@ impl fmt::Display for WriteError {
                     path.display()
                 )
             }
+            Self::LockFile { path, error } => write!(
+                f,
+                "the lock file `{}` of the records cannot be made: {error}",
+                path.display()
+            ),
         }
     }
 }
@@ -357,7 +392,7 @@ impl std::error::Error for WriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Refused(refusal) => refusal.source(),
-            Self::Io { error, .. } => Some(error),
+            Self::Io { error, .. } | Self::LockFile { error, .. } => Some(error),
         }
     }
 }
@@ -377,7 +412,7 @@ pub struct RecordReader {
 }
 
 impl RecordReader {
-    /// A reader of the records in `build_directory`.
+    /// A reader of the records in `build_directory`. It makes no file there.
     #[must_use]
     pub fn in_build_directory(build_directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -432,6 +467,10 @@ impl RecordReader {
     /// nothing else tells it apart, so a record renamed to such a name is
     /// passed over too.
     ///
+    /// The names are listed under the Records lock of the build directory,
+    /// shared, when a writer has made its lock file: the holder of the
+    /// exclusive lock is not at work among the records meanwhile.
+    ///
     /// This reads records of any payload kind, including those of payload
     /// types the caller does not know. It does not know the inputs of any
     /// record, so only [`RecordReader::read`] checks a record against the
@@ -444,25 +483,10 @@ impl RecordReader {
         if !self.directory.exists() {
             return Ok(Vec::new());
         }
-        let io_error = |error| ReadError::Io {
-            path: self.directory.clone(),
-            error,
-        };
-        let mut paths = Vec::new();
-        for entry in fs::read_dir(&self.directory).map_err(io_error)? {
-            let entry = entry.map_err(io_error)?;
-            // A writer keeps an unfinished record in a file: a directory or
-            // a link with such a name is not one. What has such a name and
-            // no type that can be told is passed over as well: it is gone
-            // since it was listed, as an unfinished record is once it is
-            // finished.
-            let named_unfinished = |name: &str| UnfinishedName::parse(name).is_some();
-            let unfinished = entry.file_name().to_str().is_some_and(named_unfinished)
-                && entry.file_type().map_or(true, |kind| kind.is_file());
-            if !unfinished {
-                paths.push(entry.path());
-            }
-        }
+        // The lock is held while the names are listed, and no longer: a
+        // record is read whole under its name with or without it.
+        let list = || paths_to_read(&self.directory);
+        let mut paths = lock::while_listing_the_records(&self.directory, list)?;
         paths.sort();
 
         let read = |path: &PathBuf| {
@@ -472,6 +496,30 @@ impl RecordReader {
         };
         Ok(paths.iter().map(read).collect())
     }
+}
+
+/// What is among the records in `records_directory`, but the unfinished
+/// records, which are no records yet.
+fn paths_to_read(records_directory: &Path) -> Result<Vec<PathBuf>, ReadError> {
+    let io_error = |error| ReadError::Io {
+        path: records_directory.to_owned(),
+        error,
+    };
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(records_directory).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        // A writer keeps an unfinished record in a file: a directory or a
+        // link with such a name is not one. What has such a name and no
+        // type that can be told is passed over as well: it is gone since it
+        // was listed, as an unfinished record is once it is finished.
+        let named_unfinished = |name: &str| UnfinishedName::parse(name).is_some();
+        let unfinished = entry.file_name().to_str().is_some_and(named_unfinished)
+            && entry.file_type().map_or(true, |kind| kind.is_file());
+        if !unfinished {
+            paths.push(entry.path());
+        }
+    }
+    Ok(paths)
 }
 
 /// The record in `file`, which is stored under the key `stored_under`.

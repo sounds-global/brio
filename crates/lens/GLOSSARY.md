@@ -80,6 +80,10 @@ _Avoid_: null writer, no-op writer
 A record its writer is still writing, in a file with a name of that writer's alone. It gets the name of a record only once it is complete, so no reader is given half a record, and a reader passes it over until then.
 _Avoid_: temporary file, partial record
 
+**Records lock**:
+The lock by which the readers and writers of the records of one build directory, in any number of processes, keep out of each other's way: a file beside the records, locked shared to list the records or to make a new one, and exclusive to be alone at work among them.
+_Avoid_: build lock, mutex, lock file (for the lock itself)
+
 **Stage test**:
 A comparison of a test program's **Stage records** against reviewed reference records: a set of **Produced records** against a set of **Reference records**.
 _Avoid_: snapshot test, golden test

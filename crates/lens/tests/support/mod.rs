@@ -275,6 +275,21 @@ pub fn files_under(directory: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// The lock file of `build_directory`, the Records lock: beside its
+/// records, with this name.
+pub fn lock_file(build_directory: &Path) -> PathBuf {
+    build_directory.join("lens.lock")
+}
+
+/// Every file under `directory`, at any depth, but the lock file that a
+/// writer makes beside the records of a build directory: what is there of
+/// the records themselves.
+pub fn files_under_but_the_lock(directory: &Path) -> Vec<PathBuf> {
+    let mut files = files_under(directory);
+    files.retain(|file| file.file_name() != lock_file(Path::new("")).file_name());
+    files
+}
+
 /// Changes the one written record at `path` by replacing `from` with `to`.
 pub fn tamper(path: &Path, from: &str, to: &str) {
     let text = fs::read_to_string(path).expect("the record can be read");
