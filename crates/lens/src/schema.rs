@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::json::Value;
+use crate::json::{Value, json};
 
 use crate::{Envelope, PayloadSchema, canonical, envelope};
 
@@ -115,4 +115,9 @@ impl Schema {
         }
         canonical::to_text(document)
     }
+}
+
+/// A reference, in the published schema, to the definition called `name`.
+pub(crate) fn reference(name: &str) -> Value {
+    json!({ "$ref": format!("#/$defs/{name}") })
 }

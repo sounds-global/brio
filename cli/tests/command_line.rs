@@ -5,13 +5,195 @@
 use std::process::{Command, Output};
 
 /// The published schema while no phase is linked: the envelope alone.
-const ENVELOPE_SCHEMA: &str = r#"{
+const ENVELOPE_SCHEMA: &str = r##"{
+  "$defs": {
+    "element": {
+      "description": "One element of what the stage produced.",
+      "properties": {
+        "children": {
+          "description": "The elements inside this one, in their order. Each names this element as its parent.",
+          "items": {
+            "$ref": "#/$defs/stable_identifier"
+          },
+          "type": "array"
+        },
+        "parent": {
+          "description": "The element this one is inside, or null for a root.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/stable_identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "description": "What the phase says about this element alone, in the form its payload kind defines."
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "reasons": {
+          "description": "The reason for every decision the phase made about this element.",
+          "items": {
+            "$ref": "#/$defs/reason"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "parent",
+        "children",
+        "payload",
+        "provenance",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "element_link": {
+      "description": "A link to one element of a record. The record is the one with this module and this payload kind, and the element is under this stable identifier in its element table.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stable_identifier"
+        },
+        "module": {
+          "description": "The module of the record the element is in.",
+          "type": "string"
+        },
+        "payload_kind": {
+          "description": "The payload kind of the record the element is in.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "module",
+        "payload_kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "origin_step": {
+      "description": "One step of a chain of origin: what made a compiler-created element, and the element it was made from.",
+      "properties": {
+        "by": {
+          "description": "What made the element at this step, such as inlining, monomorphization or compile-time evaluation.",
+          "type": "string"
+        },
+        "from": {
+          "$ref": "#/$defs/element_link"
+        }
+      },
+      "required": [
+        "by",
+        "from"
+      ],
+      "type": "object"
+    },
+    "provenance": {
+      "description": "The provenance of an element: where it comes from.",
+      "properties": {
+        "derived_from": {
+          "description": "The elements of the previous stage that the element derives from.",
+          "items": {
+            "$ref": "#/$defs/element_link"
+          },
+          "type": "array"
+        },
+        "origin": {
+          "description": "The chain of origin of an element the compiler created: every step that made it, starting with the last. Empty for any other element. The element the last step was made from comes from source text, or has a chain of its own.",
+          "items": {
+            "$ref": "#/$defs/origin_step"
+          },
+          "type": "array"
+        },
+        "source": {
+          "description": "The spans of source text the element comes from.",
+          "items": {
+            "$ref": "#/$defs/source_span"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "source",
+        "derived_from",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "reason": {
+      "description": "A reason: the recorded justification for one decision a phase made about an element.",
+      "properties": {
+        "because": {
+          "description": "What justifies the decision, in the form the phase defines."
+        },
+        "decision": {
+          "description": "The phase's name for what it decided.",
+          "type": "string"
+        },
+        "elements": {
+          "description": "The elements the justification is about.",
+          "items": {
+            "$ref": "#/$defs/element_link"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision",
+        "because",
+        "elements"
+      ],
+      "type": "object"
+    },
+    "source_span": {
+      "description": "A span of source text: some bytes of one source file.",
+      "properties": {
+        "end": {
+          "description": "Where the span ends: how many bytes of the file are before its end. The byte at this place is not in the span.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The source file, by its name in the workspace. Never an absolute path.",
+          "type": "string"
+        },
+        "start": {
+          "description": "Where the span starts: how many bytes of the file are before it.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "stable_identifier": {
+      "description": "A stable identifier: the name of one element, the same in every build.",
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "digest": {
       "description": "The BLAKE3 of this record without this field, as JSON text with sorted keys, an indent of two spaces and a final newline.",
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
+    },
+    "elements": {
+      "additionalProperties": {
+        "$ref": "#/$defs/element"
+      },
+      "description": "The element table: every element of what the stage produced, under its stable identifier. The table is flat, whatever the structure of the stage.",
+      "propertyNames": {
+        "$ref": "#/$defs/stable_identifier"
+      },
+      "type": "object"
     },
     "envelope_version": {
       "const": 1
@@ -24,13 +206,19 @@ const ENVELOPE_SCHEMA: &str = r#"{
     "module": {
       "type": "string"
     },
-    "payload": {},
     "payload_kind": {
       "type": "string"
     },
     "payload_version": {
       "minimum": 0,
       "type": "integer"
+    },
+    "roots": {
+      "description": "The elements that are inside no other, in their order.",
+      "items": {
+        "$ref": "#/$defs/stable_identifier"
+      },
+      "type": "array"
     }
   },
   "required": [
@@ -39,14 +227,15 @@ const ENVELOPE_SCHEMA: &str = r#"{
     "module",
     "payload_kind",
     "payload_version",
-    "payload",
+    "roots",
+    "elements",
     "digest"
   ],
   "title": "Brio Lens record",
   "type": "object",
   "version": "1"
 }
-"#;
+"##;
 
 fn brio(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_brio"))

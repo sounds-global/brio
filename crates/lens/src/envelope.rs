@@ -7,13 +7,17 @@
 //! when a record is made as when it is read. The published schema describes
 //! what is defined here, so records and schema cannot drift.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::json::{Map, Value, json};
 
-use crate::hash;
-use crate::payload::{self, InvalidPayloadKind, Payload};
-use crate::{PayloadSchema, RecordInputs, RecordKey, canonical};
+use crate::payload::{self, InvalidPayloadKind, Payload, PayloadType};
+use crate::schema::reference;
+use crate::{
+    Element, ElementTable, PayloadSchema, Reason, RecordInputs, RecordKey, SourceSpan, StableId,
+    Stage, canonical, element, hash, provenance, reason,
+};
 
 /// The JSON name of the envelope version.
 const ENVELOPE_VERSION: &str = "envelope_version";
@@ -25,29 +29,38 @@ const MODULE: &str = "module";
 const PAYLOAD_KIND: &str = "payload_kind";
 /// The JSON name of the payload version.
 const PAYLOAD_VERSION: &str = "payload_version";
-/// The JSON name of the payload.
-const PAYLOAD: &str = "payload";
+/// The JSON name of the roots of the element table.
+const ROOTS: &str = "roots";
+/// The JSON name of the elements of the element table.
+const ELEMENTS: &str = "elements";
 /// The JSON name of the digest of all the other fields.
 const DIGEST: &str = "digest";
 
 /// Every field of a record. All of them are required.
-const FIELDS: [&str; 7] = [
+const FIELDS: [&str; 8] = [
     ENVELOPE_VERSION,
     KEY,
     MODULE,
     PAYLOAD_KIND,
     PAYLOAD_VERSION,
-    PAYLOAD,
+    ROOTS,
+    ELEMENTS,
     DIGEST,
 ];
 
-/// What a record says about itself, apart from its payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How deep a record can nest arrays and objects, as JSON: a reader of JSON
+/// stops at a fixed depth.
+pub(crate) const MAX_RECORD_DEPTH: usize = 127;
+
+/// What every record shares, whatever its payload type: what the record says
+/// about itself, and the element table that holds what the stage produced.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Envelope {
-    pub(crate) key: RecordKey,
-    pub(crate) module: String,
-    pub(crate) payload_kind: String,
-    pub(crate) payload_version: u32,
+    key: RecordKey,
+    module: String,
+    payload_kind: String,
+    payload_version: u32,
+    elements: ElementTable,
 }
 
 impl Envelope {
@@ -55,21 +68,15 @@ impl Envelope {
     /// it reads.
     pub const VERSION: u32 = 1;
 
-    /// How deep a payload can nest arrays and objects, as JSON.
+    /// How deep the payload of an element can nest arrays and objects, as
+    /// JSON.
     ///
     /// A reader of JSON stops at a fixed depth, and the record writer refuses
-    /// any payload a reader could not read back. A stage whose structure
-    /// nests deeper writes it flat, with each element naming its parent by
+    /// any payload a reader could not read back. The structure of a stage
+    /// never counts: elements are written flat, each naming its parent by
     /// stable identifier.
-    pub const MAX_PAYLOAD_DEPTH: usize = 126;
-
-    /// The key of the record that the stage of payload `P` computes from
-    /// `inputs`.
-    pub(crate) fn key_of<P: Payload>(
-        inputs: &RecordInputs,
-    ) -> Result<RecordKey, InvalidPayloadKind> {
-        Ok(inputs.key(payload::kind_of::<P>()?, P::VERSION))
-    }
+    // The payload is inside its element, the elements and the record.
+    pub const MAX_PAYLOAD_DEPTH: usize = MAX_RECORD_DEPTH - 3;
 
     /// The record key: the hash of every input of the record.
     #[must_use]
@@ -95,63 +102,39 @@ impl Envelope {
         self.payload_version
     }
 
-    /// The record of what the stage of payload `P` produced, as `payload`,
-    /// from `inputs`: its envelope, and its canonical JSON text with its
-    /// digest.
+    /// The elements of the record: what the stage produced.
+    #[must_use]
+    pub fn elements(&self) -> &ElementTable {
+        &self.elements
+    }
+
+    /// The record of what `stage` produced, as `payload`, from `inputs`: its
+    /// envelope, and its canonical JSON text with its digest.
     pub(crate) fn seal<P: Payload>(
+        stage: &Stage<P>,
         inputs: &RecordInputs,
         payload: &P,
     ) -> Result<(Self, String), RecordRefusal> {
         let envelope = Self {
-            key: Self::key_of::<P>(inputs)?,
-            module: inputs.module.clone(),
-            payload_kind: P::KIND.to_owned(),
-            payload_version: P::VERSION,
+            key: stage.key(inputs),
+            module: stage.module().to_owned(),
+            payload_kind: stage.payload_kind().to_owned(),
+            payload_version: stage.payload_version(),
+            elements: table_of(payload.to_elements(stage))?,
         };
-        if is_absolute_path(&envelope.module) {
-            return Err(RecordRefusal::AbsolutePath {
-                module: envelope.module,
-            });
-        }
-        let payload = payload.to_json();
-        let depth = canonical::depth(&payload);
-        if depth > Self::MAX_PAYLOAD_DEPTH {
-            return Err(RecordRefusal::PayloadTooDeep {
-                payload_kind: P::KIND,
-                depth,
-            });
-        }
-
-        let mut record = Map::new();
-        record.insert(ENVELOPE_VERSION.to_owned(), Value::from(Self::VERSION));
-        record.insert(KEY.to_owned(), Value::from(envelope.key.to_string()));
-        record.insert(MODULE.to_owned(), Value::from(envelope.module.as_str()));
-        record.insert(
-            PAYLOAD_KIND.to_owned(),
-            Value::from(envelope.payload_kind.as_str()),
-        );
-        record.insert(
-            PAYLOAD_VERSION.to_owned(),
-            Value::from(envelope.payload_version),
-        );
-        record.insert(PAYLOAD.to_owned(), payload);
-        let digest = digest_of(record.clone());
-        record.insert(DIGEST.to_owned(), Value::from(digest));
-        Ok((envelope, canonical::to_text(Value::Object(record))))
+        let text = envelope.to_text();
+        Ok((envelope, text))
     }
 
-    /// The envelope and the payload of the record written as `text`, which
-    /// is stored under the record key `stored_under`.
+    /// The envelope of the record written as `text`, which is stored under
+    /// the record key `stored_under`.
     ///
     /// The envelope version is checked first: no other field of a record
     /// with another envelope version is interpreted.
-    pub(crate) fn open(
-        text: &str,
-        stored_under: &RecordKey,
-    ) -> Result<(Self, Value), RecordDefect> {
+    pub(crate) fn open(text: &str, stored_under: &RecordKey) -> Result<Self, RecordDefect> {
         // The JSON reader stops at the depth the writer refuses beyond, so a
-        // record with a deeper payload is not read as a record at all.
-        let Ok(Value::Object(mut record)) = crate::json::from_str(text) else {
+        // deeper record is not read as a record at all.
+        let Ok(Value::Object(record)) = crate::json::from_str(text) else {
             return Err(RecordDefect::Corrupted);
         };
 
@@ -166,49 +149,189 @@ impl Envelope {
             });
         }
 
-        // A record is only ever written as canonical JSON, so any other
-        // text has been changed since, even when it means the same.
-        if canonical::to_text(Value::Object(record.clone())) != text {
-            return Err(RecordDefect::Corrupted);
-        }
-        let digest = record.remove(DIGEST).ok_or(RecordDefect::Corrupted)?;
-        if digest.as_str() != Some(digest_of(record.clone()).as_str()) {
-            return Err(RecordDefect::Corrupted);
-        }
-
-        let text_of = |record: &Map<String, Value>, field: &str| {
-            record
-                .get(field)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or(RecordDefect::Corrupted)
-        };
-        let envelope = Self {
-            key: RecordKey::from_hex(text_of(&record, KEY)?).ok_or(RecordDefect::Corrupted)?,
-            module: text_of(&record, MODULE)?,
-            payload_kind: text_of(&record, PAYLOAD_KIND)?,
-            payload_version: record
-                .get(PAYLOAD_VERSION)
-                .and_then(Value::as_u64)
-                .and_then(|version| u32::try_from(version).ok())
-                .ok_or(RecordDefect::Corrupted)?,
-        };
-        // What the writer refuses is not a record, whatever its digest says.
-        if is_absolute_path(&envelope.module) {
+        let envelope = Self::admitted(&record).ok_or(RecordDefect::Corrupted)?;
+        // A record is only ever the text the writer gives it. Any other text
+        // has been changed since, even when it means the same: this is where
+        // a digest that does not match is found, and a field no record has.
+        if envelope.to_text() != text {
             return Err(RecordDefect::Corrupted);
         }
         if envelope.key != *stored_under {
             return Err(RecordDefect::Stale);
         }
-        let payload = record.remove(PAYLOAD).ok_or(RecordDefect::Corrupted)?;
-        Ok((envelope, payload))
+        Ok(envelope)
+    }
+
+    /// The envelope that the fields of `record` describe, or `None` when
+    /// they break a rule of a record. What the writer refuses is not a
+    /// record, whatever its digest says.
+    fn admitted(record: &Map<String, Value>) -> Option<Self> {
+        let text_of = |field: &str| record.get(field).and_then(Value::as_str).map(str::to_owned);
+        let key = RecordKey::from_hex(text_of(KEY)?)?;
+        let module = text_of(MODULE)?;
+        let payload_kind = text_of(PAYLOAD_KIND)?;
+        let payload_version = record
+            .get(PAYLOAD_VERSION)
+            .and_then(Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())?;
+        if is_absolute_path(&module) || !payload::is_kind(&payload_kind) {
+            return None;
+        }
+        // A table meets the rules when it is the table Lens makes from its
+        // own elements, in their own order.
+        let written = ElementTable::from_json(record.get(ROOTS)?, record.get(ELEMENTS)?)?;
+        let elements = table_of(in_order(&written)?).ok()?;
+        (elements == written).then_some(Self {
+            key,
+            module,
+            payload_kind,
+            payload_version,
+            elements,
+        })
+    }
+
+    /// This record as canonical JSON text, with its digest.
+    fn to_text(&self) -> String {
+        let mut record = Map::new();
+        record.insert(ENVELOPE_VERSION.to_owned(), Value::from(Self::VERSION));
+        record.insert(KEY.to_owned(), Value::from(self.key.to_string()));
+        record.insert(MODULE.to_owned(), Value::from(self.module.as_str()));
+        record.insert(
+            PAYLOAD_KIND.to_owned(),
+            Value::from(self.payload_kind.as_str()),
+        );
+        record.insert(
+            PAYLOAD_VERSION.to_owned(),
+            Value::from(self.payload_version),
+        );
+        record.insert(ROOTS.to_owned(), self.elements.roots_to_json());
+        record.insert(ELEMENTS.to_owned(), self.elements.elements_to_json());
+        let digest = digest_of(record.clone());
+        record.insert(DIGEST.to_owned(), Value::from(digest));
+        canonical::to_text(Value::Object(record))
     }
 }
 
-/// Whether `module` is named by an absolute path, on any platform: from a
-/// root (`/…`, `\…`), a home directory (`~…`) or a drive (`C:\…`).
-fn is_absolute_path(module: &str) -> bool {
-    let module = module.as_bytes();
+/// The payload kind of `P`, when `P` and `module` can enter Lens as a stage.
+pub(crate) fn admit<P: PayloadType>(module: &str) -> Result<&'static str, RecordRefusal> {
+    let payload_kind = payload::kind_of::<P>()?;
+    if is_absolute_path(module) {
+        return Err(RecordRefusal::AbsolutePath {
+            module: module.to_owned(),
+        });
+    }
+    Ok(payload_kind)
+}
+
+/// The element table of `elements`, given in the order a stage produced
+/// them, with the children of every element and the roots worked out from
+/// the parents the elements name.
+///
+/// Every rule of the element table is applied here, and a table is made
+/// nowhere else.
+fn table_of(elements: Vec<Element>) -> Result<ElementTable, RecordRefusal> {
+    let mut table = ElementTable::default();
+    let mut parents = Vec::with_capacity(elements.len());
+    for element in elements {
+        admit_element(&element)?;
+        let id = element.id.clone();
+        parents.push((id.clone(), element.parent.clone()));
+        if table.elements.insert(id.clone(), element).is_some() {
+            return Err(RecordRefusal::DuplicateElement { element: id });
+        }
+    }
+    for (id, parent) in parents {
+        match parent {
+            None => table.roots.push(id),
+            Some(parent) => match table.elements.get_mut(&parent) {
+                Some(parent) => parent.children.push(id),
+                None => {
+                    return Err(RecordRefusal::MissingParent {
+                        element: id,
+                        parent,
+                    });
+                }
+            },
+        }
+    }
+    match outside_every_root(&table) {
+        Some(element) => Err(RecordRefusal::ParentCycle { element }),
+        None => Ok(table),
+    }
+}
+
+/// Checks the rules that `element` meets on its own.
+fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
+    let depth = canonical::depth(&element.payload);
+    if depth > Envelope::MAX_PAYLOAD_DEPTH {
+        return Err(RecordRefusal::PayloadTooDeep {
+            element: element.id.clone(),
+            depth,
+        });
+    }
+    let from_an_absolute_path = |span: &&SourceSpan| is_absolute_path(&span.file);
+    if let Some(span) = element.provenance.source.iter().find(from_an_absolute_path) {
+        return Err(RecordRefusal::AbsoluteSourcePath {
+            element: element.id.clone(),
+            file: span.file.clone(),
+        });
+    }
+    for reason in &element.reasons {
+        let depth = canonical::depth(&reason.because);
+        if depth > Reason::MAX_DEPTH {
+            return Err(RecordRefusal::ReasonTooDeep {
+                element: element.id.clone(),
+                depth,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// An element of `table` that no root leads to, if there is one: it is its
+/// own ancestor. Every element of `table` is listed once, under its parent
+/// or as a root.
+fn outside_every_root(table: &ElementTable) -> Option<StableId> {
+    let mut reached = BTreeSet::new();
+    let mut next: Vec<&StableId> = table.roots.iter().collect();
+    while let Some(id) = next.pop() {
+        reached.insert(id);
+        next.extend(&table.elements[id].children);
+    }
+    table
+        .elements
+        .keys()
+        .find(|id| !reached.contains(id))
+        .cloned()
+}
+
+/// The elements of `table` as a stage would produce them: each parent before
+/// its children, in their order, and without the children Lens works out.
+///
+/// `None` when the lists of `table` name an element it does not have, or
+/// name more elements than it has.
+fn in_order(table: &ElementTable) -> Option<Vec<Element>> {
+    let elements: &BTreeMap<StableId, Element> = &table.elements;
+    let mut ordered = Vec::with_capacity(elements.len());
+    let mut next: Vec<&StableId> = table.roots.iter().rev().collect();
+    while let Some(id) = next.pop() {
+        if ordered.len() == elements.len() {
+            return None;
+        }
+        let element = elements.get(id)?;
+        next.extend(element.children.iter().rev());
+        ordered.push(Element {
+            children: Vec::new(),
+            ..element.clone()
+        });
+    }
+    Some(ordered)
+}
+
+/// Whether `name` is an absolute path, on any platform: from a root (`/…`,
+/// `\…`), a home directory (`~…`) or a drive (`C:\…`).
+pub(crate) fn is_absolute_path(name: &str) -> bool {
+    let module = name.as_bytes();
     let from_a_drive = module.len() >= 3
         && module[0].is_ascii_alphabetic()
         && module[1] == b':'
@@ -216,24 +339,58 @@ fn is_absolute_path(module: &str) -> bool {
     matches!(module.first(), Some(b'/' | b'\\' | b'~')) || from_a_drive
 }
 
-/// Why Lens refuses to make a record.
+/// Why Lens refuses a stage, or the record of what it produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordRefusal {
-    /// The payload declares an invalid payload kind.
+    /// The payload type declares an invalid payload kind.
     InvalidPayloadKind(InvalidPayloadKind),
     /// The module is named by an absolute path, which no record holds.
     AbsolutePath {
-        /// The module as named in the inputs.
+        /// The module as named.
         module: String,
     },
-    /// The payload nests deeper than [`Envelope::MAX_PAYLOAD_DEPTH`], so no
-    /// reader could read the record back.
+    /// The payload of an element nests deeper than
+    /// [`Envelope::MAX_PAYLOAD_DEPTH`], so no reader could read the record
+    /// back.
     PayloadTooDeep {
-        /// The payload kind of the payload.
-        payload_kind: &'static str,
-        /// How deep the payload nests.
+        /// The element.
+        element: StableId,
+        /// How deep its payload nests.
         depth: usize,
+    },
+    /// A reason of an element nests deeper than [`Reason::MAX_DEPTH`], so no
+    /// reader could read the record back.
+    ReasonTooDeep {
+        /// The element.
+        element: StableId,
+        /// How deep the justification of the reason nests.
+        depth: usize,
+    },
+    /// An element comes from a source file named by an absolute path, which
+    /// no record holds.
+    AbsoluteSourcePath {
+        /// The element.
+        element: StableId,
+        /// The source file as named.
+        file: String,
+    },
+    /// Two elements of the record have one stable identifier.
+    DuplicateElement {
+        /// The stable identifier of both.
+        element: StableId,
+    },
+    /// An element names a parent that is not in the record.
+    MissingParent {
+        /// The element.
+        element: StableId,
+        /// The parent it names.
+        parent: StableId,
+    },
+    /// An element is its own ancestor, so no root leads to it.
+    ParentCycle {
+        /// The element.
+        element: StableId,
     },
 }
 
@@ -245,15 +402,33 @@ impl fmt::Display for RecordRefusal {
                 f,
                 "the module `{module}` is named by an absolute path, which a record never holds"
             ),
-            Self::PayloadTooDeep {
-                payload_kind,
-                depth,
-            } => write!(
+            Self::PayloadTooDeep { element, depth } => write!(
                 f,
-                "the `{payload_kind}` payload nests {depth} deep, but a record holds at most {} \
-                 levels",
+                "the payload of the element `{element}` nests {depth} deep, but an element's \
+                 payload nests at most {} levels",
                 Envelope::MAX_PAYLOAD_DEPTH
             ),
+            Self::ReasonTooDeep { element, depth } => write!(
+                f,
+                "a reason of the element `{element}` nests {depth} deep, but a reason nests at \
+                 most {} levels",
+                Reason::MAX_DEPTH
+            ),
+            Self::AbsoluteSourcePath { element, file } => write!(
+                f,
+                "the element `{element}` comes from the source file `{file}`, named by an \
+                 absolute path, which a record never holds"
+            ),
+            Self::DuplicateElement { element } => {
+                write!(f, "two elements have the stable identifier `{element}`")
+            }
+            Self::MissingParent { element, parent } => write!(
+                f,
+                "the element `{element}` names the parent `{parent}`, which is not in the record"
+            ),
+            Self::ParentCycle { element } => {
+                write!(f, "the element `{element}` is its own ancestor")
+            }
         }
     }
 }
@@ -262,7 +437,7 @@ impl std::error::Error for RecordRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidPayloadKind(error) => Some(error),
-            Self::AbsolutePath { .. } | Self::PayloadTooDeep { .. } => None,
+            _ => None,
         }
     }
 }
@@ -330,6 +505,14 @@ pub(crate) fn schema() -> Value {
          indent of two spaces and a final newline.",
     );
 
+    let id = reference(element::ID_DEFINITION);
+    let mut definitions: Map<String, Value> = provenance::definitions()
+        .into_iter()
+        .map(|(name, schema)| (name.to_owned(), schema))
+        .collect();
+    definitions.insert(element::ID_DEFINITION.to_owned(), element::id_schema());
+    definitions.insert(element::DEFINITION.to_owned(), element::schema());
+    definitions.insert(reason::DEFINITION.to_owned(), reason::schema());
     let mut properties = Map::new();
     properties.insert(
         ENVELOPE_VERSION.to_owned(),
@@ -342,7 +525,25 @@ pub(crate) fn schema() -> Value {
         PAYLOAD_VERSION.to_owned(),
         json!({ "type": "integer", "minimum": 0 }),
     );
-    properties.insert(PAYLOAD.to_owned(), json!({}));
+    properties.insert(
+        ROOTS.to_owned(),
+        json!({
+            "description": "The elements that are inside no other, in their order.",
+            "type": "array",
+            "items": id
+        }),
+    );
+    properties.insert(
+        ELEMENTS.to_owned(),
+        json!({
+            "description": "The element table: every element of what the stage produced, under \
+                            its stable identifier. The table is flat, whatever the structure of \
+                            the stage.",
+            "type": "object",
+            "propertyNames": id,
+            "additionalProperties": reference(element::DEFINITION)
+        }),
+    );
     properties.insert(DIGEST.to_owned(), digest);
 
     json!({
@@ -350,7 +551,8 @@ pub(crate) fn schema() -> Value {
         "title": "Brio Lens record",
         "type": "object",
         "required": FIELDS,
-        "properties": properties
+        "properties": properties,
+        "$defs": definitions
     })
 }
 
@@ -362,6 +564,9 @@ pub(crate) fn schema_case(payload: &PayloadSchema) -> Value {
         PAYLOAD_VERSION.to_owned(),
         json!({ "const": payload.version }),
     );
-    properties.insert(PAYLOAD.to_owned(), payload.fragment.clone());
+    properties.insert(
+        ELEMENTS.to_owned(),
+        json!({ "additionalProperties": element::schema_case(&payload.fragment) }),
+    );
     json!({ "properties": properties })
 }
