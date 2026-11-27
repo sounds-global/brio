@@ -14,7 +14,8 @@ name = "brio"
 path = "src/main.rs"
 
 [dependencies]
-brio_lens = { path = "../crates/lens" }
+brio_lens.workspace = true
+clap.workspace = true
 
 [lints]
 workspace = true

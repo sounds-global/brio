@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//! `brio lens schema`, run as a process.
+//! The `brio` command line, run as a process.
 
 use std::process::{Command, Output};
 
@@ -59,25 +59,30 @@ fn lens_schema_prints_the_same_bytes_on_every_run() {
 }
 
 #[test]
-fn an_unknown_command_fails_and_says_how_to_call_brio() {
+fn an_unknown_command_is_a_usage_error_that_names_it() {
     let output = brio(&["lens", "polish"]);
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "brio: unknown command `lens polish`\nusage: brio lens schema\n"
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("polish"));
 }
 
 #[test]
-fn no_command_fails_and_says_how_to_call_brio() {
+fn no_command_is_a_usage_error_that_lists_the_commands() {
     let output = brio(&[]);
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lens"));
+}
+
+#[test]
+fn version_prints_the_toolchain_version() {
+    let output = brio(&["--version"]);
+
+    assert!(output.status.success());
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "usage: brio lens schema\n"
+        String::from_utf8_lossy(&output.stdout),
+        concat!("brio ", env!("CARGO_PKG_VERSION"), "\n")
     );
 }

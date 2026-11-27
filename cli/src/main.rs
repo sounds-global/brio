@@ -6,28 +6,35 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use brio_lens::{PayloadSchema, Schema};
+use clap::{Parser, Subcommand};
 
-/// The exit code for a command line `brio` does not understand.
-const USAGE_ERROR: u8 = 2;
-
-fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
-
-    match words.as_slice() {
-        ["lens", "schema"] => lens_schema(),
-        [] => usage_error(),
-        _ => {
-            eprintln!("brio: unknown command `{}`", words.join(" "));
-            usage_error()
-        }
-    }
+/// The Brio language toolchain.
+#[derive(Parser)]
+#[command(name = "brio", version)]
+struct Brio {
+    #[command(subcommand)]
+    command: Command,
 }
 
-/// Says how to call `brio`, and fails.
-fn usage_error() -> ExitCode {
-    eprintln!("usage: brio lens schema");
-    ExitCode::from(USAGE_ERROR)
+/// A command of `brio`. Each one appears in the change that implements it.
+#[derive(Subcommand)]
+enum Command {
+    /// Work with Lens records
+    #[command(subcommand)]
+    Lens(LensCommand),
+}
+
+/// A command of `brio lens`.
+#[derive(Subcommand)]
+enum LensCommand {
+    /// Print the published record schema
+    Schema,
+}
+
+fn main() -> ExitCode {
+    match Brio::parse().command {
+        Command::Lens(LensCommand::Schema) => lens_schema(),
+    }
 }
 
 /// The payloads of every phase linked into this binary.

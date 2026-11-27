@@ -12,6 +12,8 @@ publish = false
 license = "Apache-2.0 WITH LLVM-exception"
 
 [workspace.dependencies]
+brio_lens = { path = "crates/lens" }
+clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 
 [workspace.lints.rust]
