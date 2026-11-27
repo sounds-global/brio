@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use crate::json::Value;
+use crate::json::{Value, json};
 use crate::{Element, ElementTable, Stage};
 
 /// What a phase declares for each payload type it records.
@@ -82,6 +82,20 @@ impl fmt::Display for InvalidPayloadKind {
 }
 
 impl std::error::Error for InvalidPayloadKind {}
+
+/// The name of the definition of a payload kind in the published schema.
+pub(crate) const KIND_DEFINITION: &str = "payload_kind";
+
+/// The JSON Schema of a payload kind: the rule on [`PayloadType::KIND`], as
+/// [`is_kind`] applies it.
+pub(crate) fn kind_schema() -> Value {
+    json!({
+        "description": "A payload kind: the name of one payload type, made of lowercase \
+                        letters, digits and `_`.",
+        "type": "string",
+        "pattern": "^[a-z0-9_]+$"
+    })
+}
 
 /// Whether `payload_kind` meets the rule on [`PayloadType::KIND`].
 pub(crate) fn is_kind(payload_kind: &str) -> bool {

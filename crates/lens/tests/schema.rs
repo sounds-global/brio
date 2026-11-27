@@ -176,6 +176,11 @@ fn a_payload_kind_with_other_than_lowercase_letters_digits_and_underscores_does_
     );
 }
 
+/// A reference, in the published schema, to the definition called `name`.
+fn to(name: &str) -> Value {
+    json!({ "$ref": format!("#/$defs/{name}") })
+}
+
 /// The published schema of a toolchain with no payload, as a document.
 fn envelope_schema() -> Value {
     let schema = Schema::assemble([]).expect("no payload assembles");
@@ -186,7 +191,6 @@ fn envelope_schema() -> Value {
 fn the_schema_describes_the_provenance_of_every_element() {
     let schema = envelope_schema();
     let defined = |name: &str| &schema["$defs"][name];
-    let to = |name: &str| json!({ "$ref": format!("#/$defs/{name}") });
 
     let element = &defined("element")["properties"];
     assert_eq!(element["provenance"], to("provenance"));
@@ -197,13 +201,13 @@ fn the_schema_describes_the_provenance_of_every_element() {
     assert_eq!(provenance["origin"]["items"], to("origin_step"));
 
     let span = &defined("source_span")["properties"];
-    assert_eq!(span["file"]["type"], "string");
+    assert_eq!(span["file"], to("workspace_name"));
     assert_eq!(span["start"]["type"], "integer");
     assert_eq!(span["end"]["type"], "integer");
 
     let link = &defined("element_link")["properties"];
-    assert_eq!(link["module"]["type"], "string");
-    assert_eq!(link["payload_kind"]["type"], "string");
+    assert_eq!(link["module"], to("workspace_name"));
+    assert_eq!(link["payload_kind"], to("payload_kind"));
     assert_eq!(link["id"], to("stable_identifier"));
 
     let step = &defined("origin_step")["properties"];
@@ -233,7 +237,6 @@ fn the_schema_describes_everything_it_defines_in_words() {
 #[test]
 fn the_schema_describes_the_reasons_of_every_element() {
     let schema = envelope_schema();
-    let to = |name: &str| json!({ "$ref": format!("#/$defs/{name}") });
 
     let reasons = &schema["$defs"]["element"]["properties"]["reasons"];
     assert_eq!(reasons["type"], "array");
@@ -242,7 +245,7 @@ fn the_schema_describes_the_reasons_of_every_element() {
     let reason = &schema["$defs"]["reason"]["properties"];
     assert_eq!(reason["decision"]["type"], "string");
     assert!(reason["because"].is_object());
-    assert_eq!(reason["elements"]["items"], to("element_link"));
+    assert_eq!(reason["involves"]["items"], to("element_link"));
 }
 
 /// The names of the fields of the object `value`.
@@ -314,4 +317,36 @@ fn a_written_record_has_exactly_the_fields_the_schema_describes() {
     );
     assert_eq!(fields(&provenance["origin"][0]), defined("origin_step"));
     assert_eq!(fields(&element["reasons"][0]), defined("reason"));
+}
+
+#[test]
+fn the_schema_admits_no_field_and_no_name_that_a_reader_rejects() {
+    let schema = envelope_schema();
+
+    // A record, and everything in it that Lens defines, has the fields the
+    // schema describes and no other.
+    assert_eq!(schema["additionalProperties"], false);
+    for name in [
+        "element",
+        "provenance",
+        "source_span",
+        "element_link",
+        "origin_step",
+        "reason",
+    ] {
+        assert_eq!(
+            schema["$defs"][name]["additionalProperties"], false,
+            "`{name}` admits other fields"
+        );
+    }
+
+    // A module, like a source file, is never named by an absolute path, and
+    // a payload kind is made of lowercase letters, digits and `_`.
+    assert_eq!(schema["properties"]["module"], to("workspace_name"));
+    assert_eq!(schema["properties"]["payload_kind"], to("payload_kind"));
+    assert_eq!(
+        schema["$defs"]["workspace_name"]["not"],
+        json!({ "pattern": r"^([/\\~]|[A-Za-z]:[/\\])" })
+    );
+    assert_eq!(schema["$defs"]["payload_kind"]["pattern"], "^[a-z0-9_]+$");
 }

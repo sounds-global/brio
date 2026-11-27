@@ -7,36 +7,16 @@ mod support;
 
 use brio_lens::json::{self, Value, json};
 use brio_lens::{
-    Element, Envelope, Payload, Reason, RecordReader, RecordRefusal, RecordWriter, SourceSpan,
-    Stage, WriteError,
+    Element, Envelope, Payload, Reason, RecordRefusal, RecordWriter, SourceSpan, Stage, WriteError,
 };
 
-use support::{Loose, Probe, files_under, inputs, probe, resealed, stage, workspace};
+use support::{
+    Forge, Loose, Probe, assert_forgeries_are_corrupted, build_directory, envelopes, files_under,
+    inputs, nested, probe, resealed, stage, workspace,
+};
 
 /// The source of the module `app::main`.
 const SOURCE: &str = "sensor a\nsensor b\n";
-
-/// The envelopes of the records in the build directory of `test`, read as a
-/// tool that knows no payload type reads them, in the order of their
-/// payload kinds.
-fn envelopes(test: &str) -> Vec<Envelope> {
-    let mut envelopes: Vec<Envelope> = RecordReader::in_build_directory(workspace_of(test))
-        .read_all()
-        .expect("the records are read")
-        .into_iter()
-        .map(|record| record.expect("the record is whole").envelope)
-        .collect();
-    envelopes.sort_by(|left, right| left.payload_kind().cmp(right.payload_kind()));
-    envelopes
-}
-
-/// The build directory of `test`.
-fn workspace_of(test: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("records")
-        .join(test)
-        .join(".brio")
-}
 
 /// Writes the record of what the stage of payload `P` produced for
 /// `app::main`, as `payload`, into the build directory of `test`.
@@ -48,7 +28,7 @@ fn write<P: Payload>(test: &str, payload: &P) -> Stage<P> {
 /// as `payload`, into the build directory of `test`.
 fn write_for<P: Payload>(test: &str, module: &str, payload: &P) -> Stage<P> {
     let stage = stage::<P>(module);
-    RecordWriter::in_build_directory(workspace_of(test))
+    RecordWriter::in_build_directory(build_directory(test))
         .write(&stage, &inputs(SOURCE), payload)
         .expect("the record is written");
     stage
@@ -165,26 +145,24 @@ fn an_elements_provenance_resolves_to_the_previous_stage_elements_it_derives_fro
     assert!(elsewhere.resolve(&envelopes).is_none());
 }
 
-#[test]
-fn a_compiler_created_element_records_its_full_chain_of_origin_back_to_source() {
-    workspace("provenance_chain");
-    // `app::util` declares a generic function. The compiler makes a copy of
-    // it for `i64`, then puts the body of that copy where `main` calls it.
+/// Writes the records of a chain of origin into the build directory of
+/// `test`, and gives the stages of `app::util` and `app::main`.
+///
+/// `app::util` declares a generic function. The compiler makes a copy of it
+/// for `i64`, then puts the body of that copy where `main` calls it.
+fn write_chain(test: &str) -> (Stage<Loose>, Stage<Loose>) {
+    workspace(test);
     let util = write_for(
-        "provenance_chain",
+        test,
         "app::util",
         &Loose(|stage| {
             vec![
-                Element::new(stage.id(&["scale"]), json!("fn scale<T>")).from_source(SourceSpan {
-                    file: "src/util.brio".to_owned(),
-                    start: 12,
-                    end: 40,
-                }),
+                Element::new(stage.id(&["scale"]), json!("fn scale<T>")).from_source(declaration()),
             ]
         }),
     );
     let main = write(
-        "provenance_chain",
+        test,
         &Loose(|stage| {
             let generic = support::stage::<Loose>("app::util").link(&["scale"]);
             vec![
@@ -196,6 +174,21 @@ fn a_compiler_created_element_records_its_full_chain_of_origin_back_to_source() 
             ]
         }),
     );
+    (util, main)
+}
+
+/// Where `app::util` declares its generic function.
+fn declaration() -> SourceSpan {
+    SourceSpan {
+        file: "src/util.brio".to_owned(),
+        start: 12,
+        end: 40,
+    }
+}
+
+#[test]
+fn a_compiler_created_element_records_its_full_chain_of_origin_back_to_source() {
+    let (util, main) = write_chain("provenance_chain");
 
     let envelopes = envelopes("provenance_chain");
     let inlined = main
@@ -222,15 +215,34 @@ fn a_compiler_created_element_records_its_full_chain_of_origin_back_to_source() 
         .from
         .resolve(&envelopes)
         .expect("the end of the chain is found");
-    assert_eq!(
-        declared.provenance().source(),
-        [SourceSpan {
-            file: "src/util.brio".to_owned(),
-            start: 12,
-            end: 40,
-        }]
-    );
+    assert_eq!(declared.provenance().source(), [declaration()]);
     assert_eq!(declared.provenance().origin(), []);
+}
+
+#[test]
+fn a_chain_of_origin_is_followed_to_source_from_any_element_on_it() {
+    let (util, main) = write_chain("provenance_chain_followed");
+    let envelopes = envelopes("provenance_chain_followed");
+    let provenance = |link: brio_lens::ElementLink| {
+        link.resolve(&envelopes)
+            .expect("the element is found")
+            .provenance()
+    };
+    let inlined = provenance(main.link(&["main", "scale<i64>", "body"]));
+    let declaration = declaration();
+
+    assert_eq!(inlined.origin_source(&envelopes), [&declaration]);
+    let copy = provenance(main.link(&["scale<i64>"]));
+    assert_eq!(copy.origin_source(&envelopes), [&declaration]);
+    let declared = provenance(util.link(&["scale"]));
+    assert_eq!(declared.origin_source(&envelopes), [&declaration]);
+
+    // A chain that leaves the records at hand leads nowhere.
+    let main_alone: Vec<&Envelope> = envelopes
+        .iter()
+        .filter(|envelope| envelope.module() == "app::main")
+        .collect();
+    assert!(inlined.origin_source(main_alone).is_empty());
 }
 
 #[test]
@@ -272,10 +284,10 @@ fn a_reason_attached_to_a_decision_round_trips_unchanged() {
         json!({ "rule": "lowest reading", "candidates": { "a": 7, "b": -2 } })
     );
     assert_eq!(
-        chosen.elements,
+        chosen.involves,
         [probes.link(&["sensor", "a"]), probes.link(&["sensor", "b"])]
     );
-    let lowest = chosen.elements[1]
+    let lowest = chosen.involves[1]
         .resolve(&envelopes)
         .expect("the reading is found");
     assert_eq!(lowest.payload()["value"], -2);
@@ -288,15 +300,15 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
     let stage = stage::<Loose>("app::main");
     let writer = RecordWriter::in_build_directory(workspace.join(".brio"));
     assert_eq!(Reason::MAX_DEPTH, 122);
-    let nested = |depth: usize| (0..depth).fold(json!(null), |inner, _| json!([inner]));
 
     let path = writer
         .write(
             &stage,
             &inputs(SOURCE),
             &Loose(|stage| {
-                let nested = (0..122).fold(json!(null), |inner, _| json!([inner]));
-                vec![Element::new(stage.id(&["a"]), json!(1)).because(Reason::new("a", nested))]
+                vec![
+                    Element::new(stage.id(&["a"]), json!(1)).because(Reason::new("a", nested(122))),
+                ]
             }),
         )
         .expect("the deepest reason is written");
@@ -309,8 +321,9 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
             &stage,
             &inputs(SOURCE),
             &Loose(|stage| {
-                let nested = (0..123).fold(json!(null), |inner, _| json!([inner]));
-                vec![Element::new(stage.id(&["a"]), json!(1)).because(Reason::new("a", nested))]
+                vec![
+                    Element::new(stage.id(&["a"]), json!(1)).because(Reason::new("a", nested(123))),
+                ]
             }),
         )
         .expect_err("no reader could read this reason back");
@@ -329,7 +342,7 @@ fn a_reason_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
 }
 
 /// One element with a source span, a previous-stage element and a reason.
-fn traced(stage: &Stage<Loose>) -> Vec<Element> {
+fn with_provenance_and_a_reason(stage: &Stage<Loose>) -> Vec<Element> {
     let other = support::stage::<Probe>("app::main").link(&["sensor", "a"]);
     vec![
         Element::new(stage.id(&["a"]), json!(1))
@@ -348,49 +361,39 @@ fn a_record_whose_provenance_the_writer_would_refuse_is_rejected_even_with_a_mat
     let workspace = workspace("provenance_forged");
     let stage = stage::<Loose>("app::main");
     let path = RecordWriter::in_build_directory(workspace.join(".brio"))
-        .write(&stage, &inputs(SOURCE), &Loose(traced))
+        .write(
+            &stage,
+            &inputs(SOURCE),
+            &Loose(with_provenance_and_a_reason),
+        )
         .expect("the record is written");
-    let reader = RecordReader::in_build_directory(workspace.join(".brio"));
     let text = std::fs::read_to_string(&path).expect("the record can be read");
     let whole: Value = json::from_str(&text).expect("the record is JSON");
     assert_eq!(resealed(whole.clone()), text);
     let a = stage.id(&["a"]).to_string();
 
-    type Forge = fn(&mut Value);
     let forgeries: [(&str, Forge); 5] = [
-        ("a source file named by an absolute path", |element| {
-            element["provenance"]["source"][0]["file"] = json!("/home/ada/app/src/main.brio");
+        ("a source file named by an absolute path", &|record| {
+            record["elements"][&a]["provenance"]["source"][0]["file"] =
+                json!("/home/ada/app/src/main.brio");
         }),
-        ("a link to a module named by an absolute path", |element| {
-            element["provenance"]["derived_from"][0]["module"] = json!("~/app/main.brio");
+        ("a link to a module named by an absolute path", &|record| {
+            record["elements"][&a]["provenance"]["derived_from"][0]["module"] =
+                json!("~/app/main.brio");
         }),
-        ("a link with an invalid payload kind", |element| {
-            element["reasons"][0]["elements"][0]["payload_kind"] = json!("probe.3+gauge");
+        ("a link with an invalid payload kind", &|record| {
+            record["elements"][&a]["reasons"][0]["involves"][0]["payload_kind"] =
+                json!("probe.3+gauge");
         }),
-        ("a field no element has", |element| {
-            element["provenance"]["note"] = json!("extra");
+        ("a field no element has", &|record| {
+            record["elements"][&a]["provenance"]["note"] = json!("extra");
         }),
-        ("no reasons", |element| {
-            element
+        ("no reasons", &|record| {
+            record["elements"][&a]
                 .as_object_mut()
                 .expect("an object")
                 .remove("reasons");
         }),
     ];
-    for (what, forge) in forgeries {
-        let mut forged = whole.clone();
-        forge(&mut forged["elements"][&a]);
-        std::fs::write(&path, resealed(forged)).expect("the record can be changed");
-        let read = reader.read_all().expect("the records are read");
-        assert!(
-            matches!(
-                read[..],
-                [Err(brio_lens::ReadError::Defective {
-                    defect: brio_lens::RecordDefect::Corrupted,
-                    ..
-                })]
-            ),
-            "a record with {what} is read"
-        );
-    }
+    assert_forgeries_are_corrupted("provenance_forged", &path, &whole, &forgeries);
 }

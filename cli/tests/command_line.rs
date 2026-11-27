@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 const ENVELOPE_SCHEMA: &str = r##"{
   "$defs": {
     "element": {
+      "additionalProperties": false,
       "description": "One element of what the stage produced.",
       "properties": {
         "children": {
@@ -52,18 +53,17 @@ const ENVELOPE_SCHEMA: &str = r##"{
       "type": "object"
     },
     "element_link": {
+      "additionalProperties": false,
       "description": "A link to one element of a record. The record is the one with this module and this payload kind, and the element is under this stable identifier in its element table.",
       "properties": {
         "id": {
           "$ref": "#/$defs/stable_identifier"
         },
         "module": {
-          "description": "The module of the record the element is in.",
-          "type": "string"
+          "$ref": "#/$defs/workspace_name"
         },
         "payload_kind": {
-          "description": "The payload kind of the record the element is in.",
-          "type": "string"
+          "$ref": "#/$defs/payload_kind"
         }
       },
       "required": [
@@ -74,6 +74,7 @@ const ENVELOPE_SCHEMA: &str = r##"{
       "type": "object"
     },
     "origin_step": {
+      "additionalProperties": false,
       "description": "One step of a chain of origin: what made a compiler-created element, and the element it was made from.",
       "properties": {
         "by": {
@@ -90,7 +91,13 @@ const ENVELOPE_SCHEMA: &str = r##"{
       ],
       "type": "object"
     },
+    "payload_kind": {
+      "description": "A payload kind: the name of one payload type, made of lowercase letters, digits and `_`.",
+      "pattern": "^[a-z0-9_]+$",
+      "type": "string"
+    },
     "provenance": {
+      "additionalProperties": false,
       "description": "The provenance of an element: where it comes from.",
       "properties": {
         "derived_from": {
@@ -123,6 +130,7 @@ const ENVELOPE_SCHEMA: &str = r##"{
       "type": "object"
     },
     "reason": {
+      "additionalProperties": false,
       "description": "A reason: the recorded justification for one decision a phase made about an element.",
       "properties": {
         "because": {
@@ -132,7 +140,7 @@ const ENVELOPE_SCHEMA: &str = r##"{
           "description": "The phase's name for what it decided.",
           "type": "string"
         },
-        "elements": {
+        "involves": {
           "description": "The elements the justification is about.",
           "items": {
             "$ref": "#/$defs/element_link"
@@ -143,11 +151,12 @@ const ENVELOPE_SCHEMA: &str = r##"{
       "required": [
         "decision",
         "because",
-        "elements"
+        "involves"
       ],
       "type": "object"
     },
     "source_span": {
+      "additionalProperties": false,
       "description": "A span of source text: some bytes of one source file.",
       "properties": {
         "end": {
@@ -156,8 +165,7 @@ const ENVELOPE_SCHEMA: &str = r##"{
           "type": "integer"
         },
         "file": {
-          "description": "The source file, by its name in the workspace. Never an absolute path.",
-          "type": "string"
+          "$ref": "#/$defs/workspace_name"
         },
         "start": {
           "description": "Where the span starts: how many bytes of the file are before it.",
@@ -176,9 +184,18 @@ const ENVELOPE_SCHEMA: &str = r##"{
       "description": "A stable identifier: the name of one element, the same in every build.",
       "pattern": "^[0-9a-f]{32}$",
       "type": "string"
+    },
+    "workspace_name": {
+      "description": "A name in the workspace, such as a module or a source file. Never an absolute path.",
+      "not": {
+        "pattern": "^([/\\\\~]|[A-Za-z]:[/\\\\])"
+      },
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A record: what one stage produced for one module, or what one run did.",
   "properties": {
     "digest": {
       "description": "The BLAKE3 of this record without this field, as JSON text with sorted keys, an indent of two spaces and a final newline.",
@@ -204,10 +221,10 @@ const ENVELOPE_SCHEMA: &str = r##"{
       "type": "string"
     },
     "module": {
-      "type": "string"
+      "$ref": "#/$defs/workspace_name"
     },
     "payload_kind": {
-      "type": "string"
+      "$ref": "#/$defs/payload_kind"
     },
     "payload_version": {
       "minimum": 0,

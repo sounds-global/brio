@@ -8,6 +8,7 @@ use std::fmt;
 #[cfg(doc)]
 use crate::Stage;
 use crate::hash::{self, FieldHasher};
+use crate::stage::StageIdentity;
 
 /// Everything a record is computed from, apart from the [`Stage`] that
 /// computes it: the payload type and the module.
@@ -28,13 +29,13 @@ pub struct RecordInputs {
 }
 
 impl RecordInputs {
-    /// The key of the record that the stage with this payload kind and
-    /// payload version computes for `module` from these inputs.
-    pub(crate) fn key(&self, payload_kind: &str, payload_version: u32, module: &str) -> RecordKey {
+    /// The key of the record that `stage`, with this payload version,
+    /// computes from these inputs.
+    pub(crate) fn key(&self, stage: &StageIdentity, payload_version: u32) -> RecordKey {
         let mut hasher = FieldHasher::new("brio lens record key");
-        hasher.text(payload_kind);
+        hasher.text(stage.payload_kind());
         hasher.number(u64::from(payload_version));
-        hasher.text(module);
+        hasher.text(stage.module());
         hasher.count(self.module_inputs.len());
         for (name, content) in &self.module_inputs {
             hasher.text(name);

@@ -2,9 +2,10 @@
 
 //! Provenance: where an element of a record comes from.
 
-use crate::json::{Map, Value, json};
+use crate::json::{Value, json};
 use crate::schema::{list_schema, object_schema, reference, text_schema};
-use crate::{Element, Envelope, StableId, element, envelope};
+use crate::stage::StageIdentity;
+use crate::{Element, Envelope, StableId, element, envelope, fields};
 
 /// The JSON name of the source spans of a provenance.
 const SOURCE: &str = "source";
@@ -23,11 +24,6 @@ const FILE: &str = "file";
 const START: &str = "start";
 /// The JSON name of the end of a source span.
 const END: &str = "end";
-
-/// The JSON name of the module of an element link.
-const MODULE: &str = "module";
-/// The JSON name of the payload kind of an element link.
-const PAYLOAD_KIND: &str = "payload_kind";
 /// The JSON name of the stable identifier of an element link.
 const ID: &str = "id";
 
@@ -48,11 +44,11 @@ pub struct SourceSpan {
 impl SourceSpan {
     /// This span as it is written in a record.
     fn to_json(&self) -> Value {
-        let mut span = Map::new();
-        span.insert(FILE.to_owned(), Value::from(self.file.as_str()));
-        span.insert(START.to_owned(), Value::from(self.start));
-        span.insert(END.to_owned(), Value::from(self.end));
-        Value::Object(span)
+        fields::object([
+            (FILE, Value::from(self.file.as_str())),
+            (START, Value::from(self.start)),
+            (END, Value::from(self.end)),
+        ])
     }
 
     /// The span written as `span`, or `None` when `span` is not one.
@@ -72,32 +68,26 @@ impl SourceSpan {
 /// produced the element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElementLink {
-    module: String,
-    payload_kind: String,
+    stage: StageIdentity,
     id: StableId,
 }
 
 impl ElementLink {
-    /// The link to the element `id` of the record that the stage with
-    /// `payload_kind` produced for `module`.
-    pub(crate) fn new(module: &str, payload_kind: &str, id: StableId) -> Self {
-        Self {
-            module: module.to_owned(),
-            payload_kind: payload_kind.to_owned(),
-            id,
-        }
+    /// The link to the element `id` of the record that `stage` produced.
+    pub(crate) fn new(stage: StageIdentity, id: StableId) -> Self {
+        Self { stage, id }
     }
 
     /// The module of the record the element is in.
     #[must_use]
     pub fn module(&self) -> &str {
-        &self.module
+        self.stage.module()
     }
 
     /// The payload kind of the record the element is in.
     #[must_use]
     pub fn payload_kind(&self) -> &str {
-        &self.payload_kind
+        self.stage.payload_kind()
     }
 
     /// The stable identifier of the element.
@@ -120,37 +110,26 @@ impl ElementLink {
     ) -> Option<&'a Element> {
         envelopes
             .into_iter()
-            .filter(|envelope| {
-                envelope.module() == self.module && envelope.payload_kind() == self.payload_kind
-            })
+            .filter(|envelope| *envelope.stage() == self.stage)
             .find_map(|envelope| envelope.elements().get(&self.id))
     }
 
     /// This link as it is written in a record.
     pub(crate) fn to_json(&self) -> Value {
-        let mut link = Map::new();
-        link.insert(MODULE.to_owned(), Value::from(self.module.as_str()));
-        link.insert(
-            PAYLOAD_KIND.to_owned(),
-            Value::from(self.payload_kind.as_str()),
-        );
-        link.insert(ID.to_owned(), self.id.to_json());
-        Value::Object(link)
+        fields::object(
+            self.stage
+                .fields()
+                .into_iter()
+                .chain([(ID, self.id.to_json())]),
+        )
     }
 
-    /// The link written as `link`, or `None` when `link` is not one: a link
-    /// only ever names a module and a payload kind that a stage can have.
+    /// The link written as `link`, or `None` when `link` is not one.
     pub(crate) fn from_json(link: &Value) -> Option<Self> {
-        let module = link.get(MODULE)?.as_str()?;
-        let payload_kind = link.get(PAYLOAD_KIND)?.as_str()?;
-        if !envelope::names_a_stage(module, payload_kind) {
-            return None;
-        }
-        Some(Self::new(
-            module,
-            payload_kind,
-            StableId::from_json(link.get(ID)?)?,
-        ))
+        Some(Self {
+            stage: StageIdentity::from_json(link)?,
+            id: StableId::from_json(link.get(ID)?)?,
+        })
     }
 }
 
@@ -168,10 +147,10 @@ pub struct OriginStep {
 impl OriginStep {
     /// This step as it is written in a record.
     fn to_json(&self) -> Value {
-        let mut step = Map::new();
-        step.insert(BY.to_owned(), Value::from(self.by.as_str()));
-        step.insert(FROM.to_owned(), self.from.to_json());
-        Value::Object(step)
+        fields::object([
+            (BY, Value::from(self.by.as_str())),
+            (FROM, self.from.to_json()),
+        ])
     }
 
     /// The step written as `step`, or `None` when `step` is not one.
@@ -220,39 +199,60 @@ impl Provenance {
         &self.origin
     }
 
+    /// The source text that the chain of origin leads to, among the records
+    /// with `envelopes`: the spans this element comes from, or else the
+    /// spans of the first element back along the chain that comes from
+    /// source text.
+    ///
+    /// It is empty when the chain leaves `envelopes` or never reaches source
+    /// text. The records are those of one build, as for
+    /// [`ElementLink::resolve`].
+    pub fn origin_source<'a>(
+        &'a self,
+        envelopes: impl IntoIterator<Item = &'a Envelope>,
+    ) -> Vec<&'a SourceSpan> {
+        let envelopes: Vec<&Envelope> = envelopes.into_iter().collect();
+        let mut provenance = self;
+        let mut followed: Vec<&ElementLink> = Vec::new();
+        while provenance.source.is_empty() {
+            // The last step of a chain is the furthest back.
+            let Some(step) = provenance.origin.last() else {
+                break;
+            };
+            // A chain that comes back to an element it left leads nowhere.
+            if followed.contains(&&step.from) {
+                break;
+            }
+            followed.push(&step.from);
+            match step.from.resolve(envelopes.iter().copied()) {
+                Some(element) => provenance = element.provenance(),
+                None => break,
+            }
+        }
+        provenance.source.iter().collect()
+    }
+
     /// This provenance as it is written in a record.
     pub(crate) fn to_json(&self) -> Value {
-        let mut provenance = Map::new();
-        provenance.insert(
-            SOURCE.to_owned(),
-            self.source.iter().map(SourceSpan::to_json).collect(),
-        );
-        provenance.insert(
-            DERIVED_FROM.to_owned(),
-            self.derived_from.iter().map(ElementLink::to_json).collect(),
-        );
-        provenance.insert(
-            ORIGIN.to_owned(),
-            self.origin.iter().map(OriginStep::to_json).collect(),
-        );
-        Value::Object(provenance)
+        fields::object([
+            (SOURCE, fields::list(&self.source, SourceSpan::to_json)),
+            (
+                DERIVED_FROM,
+                fields::list(&self.derived_from, ElementLink::to_json),
+            ),
+            (ORIGIN, fields::list(&self.origin, OriginStep::to_json)),
+        ])
     }
 
     /// The provenance written as `provenance`, or `None` when `provenance`
     /// is not one.
     pub(crate) fn from_json(provenance: &Value) -> Option<Self> {
         Some(Self {
-            source: list_from_json(provenance.get(SOURCE)?, SourceSpan::from_json)?,
-            derived_from: list_from_json(provenance.get(DERIVED_FROM)?, ElementLink::from_json)?,
-            origin: list_from_json(provenance.get(ORIGIN)?, OriginStep::from_json)?,
+            source: fields::list_from(provenance.get(SOURCE)?, SourceSpan::from_json)?,
+            derived_from: fields::list_from(provenance.get(DERIVED_FROM)?, ElementLink::from_json)?,
+            origin: fields::list_from(provenance.get(ORIGIN)?, OriginStep::from_json)?,
         })
     }
-}
-
-/// The list written as `list`, each item read by `item`, or `None` when
-/// `list` is not a list of such items.
-pub(crate) fn list_from_json<T>(list: &Value, item: fn(&Value) -> Option<T>) -> Option<Vec<T>> {
-    list.as_array()?.iter().map(item).collect()
 }
 
 /// The name of the definition of a provenance in the published schema.
@@ -275,12 +275,7 @@ fn span_schema() -> Value {
     object_schema(
         "A span of source text: some bytes of one source file.",
         &[
-            (
-                FILE,
-                text_schema(
-                    "The source file, by its name in the workspace. Never an absolute path.",
-                ),
-            ),
+            (FILE, reference(envelope::NAME_DEFINITION)),
             (
                 START,
                 offset_schema("Where the span starts: how many bytes of the file are before it."),
@@ -298,18 +293,13 @@ fn span_schema() -> Value {
 
 /// The JSON Schema of an element link.
 fn link_schema() -> Value {
+    let [module, payload_kind] = StageIdentity::schema_fields();
     object_schema(
         "A link to one element of a record. The record is the one with this module and this \
          payload kind, and the element is under this stable identifier in its element table.",
         &[
-            (
-                MODULE,
-                text_schema("The module of the record the element is in."),
-            ),
-            (
-                PAYLOAD_KIND,
-                text_schema("The payload kind of the record the element is in."),
-            ),
+            module,
+            payload_kind,
             (ID, reference(element::ID_DEFINITION)),
         ],
     )

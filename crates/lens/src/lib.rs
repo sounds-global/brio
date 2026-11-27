@@ -15,6 +15,7 @@
 mod canonical;
 mod element;
 mod envelope;
+mod fields;
 mod hash;
 mod identity;
 mod inputs;

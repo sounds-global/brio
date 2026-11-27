@@ -5,9 +5,9 @@
 use std::collections::BTreeMap;
 
 use crate::json::{Map, Value, json};
-use crate::provenance::{self, OriginStep, Provenance, list_from_json};
+use crate::provenance::{self, OriginStep, Provenance};
 use crate::schema::{list_schema, object_schema, reference};
-use crate::{ElementLink, Reason, SourceSpan, StableId, reason};
+use crate::{ElementLink, Reason, SourceSpan, StableId, fields, reason};
 
 /// The JSON name of the parent of an element.
 const PARENT: &str = "parent";
@@ -144,25 +144,21 @@ impl Element {
     /// This element as it is written in the element table, under its stable
     /// identifier.
     fn to_json(&self) -> Value {
-        let mut element = Map::new();
-        element.insert(
-            PARENT.to_owned(),
-            self.parent.as_ref().map_or(Value::Null, StableId::to_json),
-        );
-        element.insert(CHILDREN.to_owned(), ids_to_json(&self.children));
-        element.insert(PAYLOAD.to_owned(), self.payload.clone());
-        element.insert(PROVENANCE.to_owned(), self.provenance.to_json());
-        element.insert(
-            REASONS.to_owned(),
-            self.reasons.iter().map(Reason::to_json).collect(),
-        );
-        Value::Object(element)
+        fields::object([
+            (
+                PARENT,
+                self.parent.as_ref().map_or(Value::Null, StableId::to_json),
+            ),
+            (CHILDREN, fields::list(&self.children, StableId::to_json)),
+            (PAYLOAD, self.payload.clone()),
+            (PROVENANCE, self.provenance.to_json()),
+            (REASONS, fields::list(&self.reasons, Reason::to_json)),
+        ])
     }
 
     /// The element written as `element` under the stable identifier `id`,
     /// or `None` when `element` is not an element.
     fn from_json(id: StableId, element: &Value) -> Option<Self> {
-        let element = element.as_object()?;
         let parent = match element.get(PARENT)? {
             Value::Null => None,
             parent => Some(StableId::from_json(parent)?),
@@ -170,10 +166,10 @@ impl Element {
         Some(Self {
             id,
             parent,
-            children: ids_from_json(element.get(CHILDREN)?)?,
+            children: fields::list_from(element.get(CHILDREN)?, StableId::from_json)?,
             payload: element.get(PAYLOAD)?.clone(),
             provenance: Provenance::from_json(element.get(PROVENANCE)?)?,
-            reasons: list_from_json(element.get(REASONS)?, Reason::from_json)?,
+            reasons: fields::list_from(element.get(REASONS)?, Reason::from_json)?,
         })
     }
 }
@@ -221,9 +217,31 @@ impl ElementTable {
         self.elements.is_empty()
     }
 
+    /// Every element, each parent before its children, in their order: the
+    /// order in which the stage produced them, when it produced each parent
+    /// before its children.
+    pub fn in_order(&self) -> impl Iterator<Item = &Element> {
+        let mut ordered = Vec::with_capacity(self.elements.len());
+        let mut next: Vec<&StableId> = self.roots.iter().rev().collect();
+        while let Some(id) = next.pop() {
+            // A table read from a record is walked before it is known to
+            // meet the rules, so the walk never trusts its lists: it stops
+            // once it has as many elements as the table holds, and passes
+            // over a stable identifier the table does not have.
+            if ordered.len() == self.elements.len() {
+                break;
+            }
+            if let Some(element) = self.elements.get(id) {
+                next.extend(element.children.iter().rev());
+                ordered.push(element);
+            }
+        }
+        ordered.into_iter()
+    }
+
     /// The roots as they are written in a record.
     pub(crate) fn roots_to_json(&self) -> Value {
-        ids_to_json(&self.roots)
+        fields::list(&self.roots, StableId::to_json)
     }
 
     /// The elements as they are written in a record.
@@ -249,21 +267,10 @@ impl ElementTable {
             })
             .collect::<Option<BTreeMap<StableId, Element>>>()?;
         Some(Self {
-            roots: ids_from_json(roots)?,
+            roots: fields::list_from(roots, StableId::from_json)?,
             elements,
         })
     }
-}
-
-/// A list of stable identifiers as JSON.
-fn ids_to_json(ids: &[StableId]) -> Value {
-    ids.iter().map(StableId::to_json).collect()
-}
-
-/// The list of stable identifiers written as `ids`, or `None` when `ids` is
-/// not one.
-fn ids_from_json(ids: &Value) -> Option<Vec<StableId>> {
-    ids.as_array()?.iter().map(StableId::from_json).collect()
 }
 
 /// The name of the definition of a stable identifier in the published

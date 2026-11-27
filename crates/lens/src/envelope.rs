@@ -7,26 +7,23 @@
 //! when a record is made as when it is read. The published schema describes
 //! what is defined here, so records and schema cannot drift.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::json::{Map, Value, json};
 
 use crate::payload::{self, InvalidPayloadKind, Payload, PayloadType};
-use crate::schema::{list_schema, reference};
+use crate::schema::{list_schema, object_schema, reference};
+use crate::stage::{self, StageIdentity};
 use crate::{
     Element, ElementTable, PayloadSchema, Reason, RecordInputs, RecordKey, SourceSpan, StableId,
-    Stage, canonical, element, hash, provenance, reason,
+    Stage, canonical, element, fields, hash, provenance, reason,
 };
 
 /// The JSON name of the envelope version.
 const ENVELOPE_VERSION: &str = "envelope_version";
 /// The JSON name of the record key.
 const KEY: &str = "key";
-/// The JSON name of the module the record is for.
-const MODULE: &str = "module";
-/// The JSON name of the payload kind.
-const PAYLOAD_KIND: &str = "payload_kind";
 /// The JSON name of the payload version.
 const PAYLOAD_VERSION: &str = "payload_version";
 /// The JSON name of the roots of the element table.
@@ -36,29 +33,20 @@ const ELEMENTS: &str = "elements";
 /// The JSON name of the digest of all the other fields.
 const DIGEST: &str = "digest";
 
-/// Every field of a record. All of them are required.
-const FIELDS: [&str; 8] = [
-    ENVELOPE_VERSION,
-    KEY,
-    MODULE,
-    PAYLOAD_KIND,
-    PAYLOAD_VERSION,
-    ROOTS,
-    ELEMENTS,
-    DIGEST,
-];
-
 /// How deep a record can nest arrays and objects, as JSON: a reader of JSON
 /// stops at a fixed depth.
-pub(crate) const MAX_RECORD_DEPTH: usize = 127;
+const MAX_RECORD_DEPTH: usize = 127;
+
+/// How deep the justification of a reason can nest: it is inside its reason,
+/// the reasons, their element, the elements and the record.
+pub(crate) const MAX_REASON_DEPTH: usize = MAX_RECORD_DEPTH - 5;
 
 /// What every record shares, whatever its payload type: what the record says
 /// about itself, and the element table that holds what the stage produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Envelope {
     key: RecordKey,
-    module: String,
-    payload_kind: String,
+    stage: StageIdentity,
     payload_version: u32,
     elements: ElementTable,
 }
@@ -87,13 +75,18 @@ impl Envelope {
     /// The module the record is for.
     #[must_use]
     pub fn module(&self) -> &str {
-        &self.module
+        self.stage.module()
     }
 
     /// The payload kind of the record's payload.
     #[must_use]
     pub fn payload_kind(&self) -> &str {
-        &self.payload_kind
+        self.stage.payload_kind()
+    }
+
+    /// What identifies the stage that produced the record.
+    pub(crate) fn stage(&self) -> &StageIdentity {
+        &self.stage
     }
 
     /// The version of the format of the record's payload.
@@ -117,8 +110,7 @@ impl Envelope {
     ) -> Result<(Self, String), RecordRefusal> {
         let envelope = Self {
             key: stage.key(inputs),
-            module: stage.module().to_owned(),
-            payload_kind: stage.payload_kind().to_owned(),
+            stage: stage.identity().clone(),
             payload_version: stage.payload_version(),
             elements: table_of(payload.to_elements(stage))?,
         };
@@ -134,7 +126,7 @@ impl Envelope {
     pub(crate) fn open(text: &str, stored_under: &RecordKey) -> Result<Self, RecordDefect> {
         // The JSON reader stops at the depth the writer refuses beyond, so a
         // deeper record is not read as a record at all.
-        let Ok(Value::Object(record)) = crate::json::from_str(text) else {
+        let Ok(record @ Value::Object(_)) = crate::json::from_str::<Value>(text) else {
             return Err(RecordDefect::Corrupted);
         };
 
@@ -165,26 +157,20 @@ impl Envelope {
     /// The envelope that the fields of `record` describe, or `None` when
     /// they break a rule of a record. What the writer refuses is not a
     /// record, whatever its digest says.
-    fn admitted(record: &Map<String, Value>) -> Option<Self> {
-        let text_of = |field: &str| record.get(field).and_then(Value::as_str).map(str::to_owned);
-        let key = RecordKey::from_hex(text_of(KEY)?)?;
-        let module = text_of(MODULE)?;
-        let payload_kind = text_of(PAYLOAD_KIND)?;
+    fn admitted(record: &Value) -> Option<Self> {
+        let key = RecordKey::from_hex(record.get(KEY)?.as_str()?.to_owned())?;
+        let stage = StageIdentity::from_json(record)?;
         let payload_version = record
             .get(PAYLOAD_VERSION)
             .and_then(Value::as_u64)
             .and_then(|version| u32::try_from(version).ok())?;
-        if !names_a_stage(&module, &payload_kind) {
-            return None;
-        }
         // A table meets the rules when it is the table Lens makes from its
         // own elements, in their own order.
         let written = ElementTable::from_json(record.get(ROOTS)?, record.get(ELEMENTS)?)?;
-        let elements = table_of(in_order(&written)?).ok()?;
+        let elements = table_of(written.in_order().cloned().collect()).ok()?;
         (elements == written).then_some(Self {
             key,
-            module,
-            payload_kind,
+            stage,
             payload_version,
             elements,
         })
@@ -192,41 +178,27 @@ impl Envelope {
 
     /// This record as canonical JSON text, with its digest.
     fn to_text(&self) -> String {
-        let mut record = Map::new();
-        record.insert(ENVELOPE_VERSION.to_owned(), Value::from(Self::VERSION));
-        record.insert(KEY.to_owned(), Value::from(self.key.to_string()));
-        record.insert(MODULE.to_owned(), Value::from(self.module.as_str()));
-        record.insert(
-            PAYLOAD_KIND.to_owned(),
-            Value::from(self.payload_kind.as_str()),
-        );
-        record.insert(
-            PAYLOAD_VERSION.to_owned(),
-            Value::from(self.payload_version),
-        );
-        record.insert(ROOTS.to_owned(), self.elements.roots_to_json());
-        record.insert(ELEMENTS.to_owned(), self.elements.elements_to_json());
+        let mut record = fields::map(self.stage.fields().into_iter().chain([
+            (ENVELOPE_VERSION, Value::from(Self::VERSION)),
+            (KEY, Value::from(self.key.to_string())),
+            (PAYLOAD_VERSION, Value::from(self.payload_version)),
+            (ROOTS, self.elements.roots_to_json()),
+            (ELEMENTS, self.elements.elements_to_json()),
+        ]));
         let digest = digest_of(record.clone());
         record.insert(DIGEST.to_owned(), Value::from(digest));
         canonical::to_text(Value::Object(record))
     }
 }
 
-/// Whether a stage can have the name `module` and the payload kind
-/// `payload_kind`: what a record, or a link to an element, says of its stage.
-pub(crate) fn names_a_stage(module: &str, payload_kind: &str) -> bool {
-    !is_absolute_path(module) && payload::is_kind(payload_kind)
-}
-
-/// The payload kind of `P`, when `P` and `module` can enter Lens as a stage.
-pub(crate) fn admit<P: PayloadType>(module: &str) -> Result<&'static str, RecordRefusal> {
+/// What identifies the stage of payload `P` at work on `module`, when they
+/// can enter Lens.
+pub(crate) fn admit<P: PayloadType>(module: &str) -> Result<StageIdentity, RecordRefusal> {
     let payload_kind = payload::kind_of::<P>()?;
-    if is_absolute_path(module) {
-        return Err(RecordRefusal::AbsolutePath {
-            module: module.to_owned(),
-        });
-    }
-    Ok(payload_kind)
+    // The payload kind is valid, so only the module can be refused now.
+    StageIdentity::admitted(module, payload_kind).ok_or_else(|| RecordRefusal::AbsoluteModulePath {
+        module: module.to_owned(),
+    })
 }
 
 /// The element table of `elements`, given in the order a stage produced
@@ -287,7 +259,7 @@ fn admit_element(element: &Element) -> Result<(), RecordRefusal> {
     }
     for reason in &element.reasons {
         let depth = canonical::depth(&reason.because);
-        if depth > Reason::MAX_DEPTH {
+        if depth > MAX_REASON_DEPTH {
             return Err(RecordRefusal::ReasonTooDeep {
                 element: element.id.clone(),
                 depth,
@@ -314,26 +286,6 @@ fn outside_every_root(table: &ElementTable) -> Option<StableId> {
         .cloned()
 }
 
-/// The elements of `table` as a stage would produce them: each parent before
-/// its children, in their order.
-///
-/// `None` when the lists of `table` name an element it does not have, or
-/// name more elements than it has.
-fn in_order(table: &ElementTable) -> Option<Vec<Element>> {
-    let elements: &BTreeMap<StableId, Element> = &table.elements;
-    let mut ordered = Vec::with_capacity(elements.len());
-    let mut next: Vec<&StableId> = table.roots.iter().rev().collect();
-    while let Some(id) = next.pop() {
-        if ordered.len() == elements.len() {
-            return None;
-        }
-        let element = elements.get(id)?;
-        next.extend(element.children.iter().rev());
-        ordered.push(element.clone());
-    }
-    Some(ordered)
-}
-
 /// Whether `name` is an absolute path, on any platform: from a root (`/…`,
 /// `\…`), a home directory (`~…`) or a drive (`C:\…`).
 pub(crate) fn is_absolute_path(name: &str) -> bool {
@@ -352,7 +304,7 @@ pub enum RecordRefusal {
     /// The payload type declares an invalid payload kind.
     InvalidPayloadKind(InvalidPayloadKind),
     /// The module is named by an absolute path, which no record holds.
-    AbsolutePath {
+    AbsoluteModulePath {
         /// The module as named.
         module: String,
     },
@@ -404,7 +356,7 @@ impl fmt::Display for RecordRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPayloadKind(error) => error.fmt(f),
-            Self::AbsolutePath { module } => write!(
+            Self::AbsoluteModulePath { module } => write!(
                 f,
                 "the module `{module}` is named by an absolute path, which a record never holds"
             ),
@@ -497,81 +449,98 @@ fn digest_of(record_without_digest: Map<String, Value>) -> String {
     hash::hex(&hash::of(text.as_bytes()))
 }
 
-/// The JSON Schema of what every record shares.
-pub(crate) fn schema() -> Value {
-    let hash = json!({ "type": "string", "pattern": "^[0-9a-f]{64}$" });
-    let mut key = hash.clone();
-    key["description"] = Value::from(
-        "The record key: the BLAKE3 of every input of the record. A record is stored under \
-         its key.",
-    );
-    let mut digest = hash;
-    digest["description"] = Value::from(
-        "The BLAKE3 of this record without this field, as JSON text with sorted keys, an \
-         indent of two spaces and a final newline.",
-    );
+/// The name of the definition, in the published schema, of a name in the
+/// workspace.
+pub(crate) const NAME_DEFINITION: &str = "workspace_name";
 
-    let id = reference(element::ID_DEFINITION);
+/// The JSON Schema of a name in the workspace, such as a module or a source
+/// file: any text that [`is_absolute_path`] does not refuse.
+fn name_schema() -> Value {
+    json!({
+        "description": "A name in the workspace, such as a module or a source file. Never an \
+                        absolute path.",
+        "type": "string",
+        "not": { "pattern": r"^([/\\~]|[A-Za-z]:[/\\])" }
+    })
+}
+
+/// The JSON Schema of a hash with `description`, as 64 hexadecimal digits.
+fn hash_schema(description: &str) -> Value {
+    json!({ "description": description, "type": "string", "pattern": "^[0-9a-f]{64}$" })
+}
+
+/// The JSON Schema of everything a record is made of, each under the name of
+/// its definition.
+fn definitions() -> Map<String, Value> {
     let mut definitions: Map<String, Value> = provenance::definitions()
         .into_iter()
         .map(|(name, schema)| (name.to_owned(), schema))
         .collect();
+    definitions.insert(NAME_DEFINITION.to_owned(), name_schema());
+    definitions.insert(payload::KIND_DEFINITION.to_owned(), payload::kind_schema());
     definitions.insert(element::ID_DEFINITION.to_owned(), element::id_schema());
     definitions.insert(element::DEFINITION.to_owned(), element::schema());
     definitions.insert(reason::DEFINITION.to_owned(), reason::schema());
-    let mut properties = Map::new();
-    properties.insert(
-        ENVELOPE_VERSION.to_owned(),
-        json!({ "const": Envelope::VERSION }),
-    );
-    properties.insert(KEY.to_owned(), key);
-    properties.insert(MODULE.to_owned(), json!({ "type": "string" }));
-    properties.insert(PAYLOAD_KIND.to_owned(), json!({ "type": "string" }));
-    properties.insert(
-        PAYLOAD_VERSION.to_owned(),
-        json!({ "type": "integer", "minimum": 0 }),
-    );
-    properties.insert(
-        ROOTS.to_owned(),
-        list_schema(
-            "The elements that are inside no other, in their order.",
-            element::ID_DEFINITION,
-        ),
-    );
-    properties.insert(
-        ELEMENTS.to_owned(),
-        json!({
-            "description": "The element table: every element of what the stage produced, under \
-                            its stable identifier. The table is flat, whatever the structure of \
-                            the stage.",
-            "type": "object",
-            "propertyNames": id,
-            "additionalProperties": reference(element::DEFINITION)
-        }),
-    );
-    properties.insert(DIGEST.to_owned(), digest);
+    definitions
+}
 
-    json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "Brio Lens record",
+/// The JSON Schema of what every record shares.
+pub(crate) fn schema() -> Value {
+    let [module, payload_kind] = StageIdentity::schema_fields();
+    let elements = json!({
+        "description": "The element table: every element of what the stage produced, under its \
+                        stable identifier. The table is flat, whatever the structure of the \
+                        stage.",
         "type": "object",
-        "required": FIELDS,
-        "properties": properties,
-        "$defs": definitions
-    })
+        "propertyNames": reference(element::ID_DEFINITION),
+        "additionalProperties": reference(element::DEFINITION)
+    });
+    let mut schema = object_schema(
+        "A record: what one stage produced for one module, or what one run did.",
+        &[
+            (ENVELOPE_VERSION, json!({ "const": Envelope::VERSION })),
+            (
+                KEY,
+                hash_schema(
+                    "The record key: the BLAKE3 of every input of the record. A record is \
+                     stored under its key.",
+                ),
+            ),
+            module,
+            payload_kind,
+            (PAYLOAD_VERSION, json!({ "type": "integer", "minimum": 0 })),
+            (
+                ROOTS,
+                list_schema(
+                    "The elements that are inside no other, in their order.",
+                    element::ID_DEFINITION,
+                ),
+            ),
+            (ELEMENTS, elements),
+            (
+                DIGEST,
+                hash_schema(
+                    "The BLAKE3 of this record without this field, as JSON text with sorted \
+                     keys, an indent of two spaces and a final newline.",
+                ),
+            ),
+        ],
+    );
+    schema["$schema"] = Value::from("https://json-schema.org/draft/2020-12/schema");
+    schema["title"] = Value::from("Brio Lens record");
+    schema["$defs"] = Value::Object(definitions());
+    schema
 }
 
 /// The part of the schema that holds for records of one payload.
 pub(crate) fn schema_case(payload: &PayloadSchema) -> Value {
-    let mut properties = Map::new();
-    properties.insert(PAYLOAD_KIND.to_owned(), json!({ "const": payload.kind }));
-    properties.insert(
-        PAYLOAD_VERSION.to_owned(),
-        json!({ "const": payload.version }),
-    );
-    properties.insert(
-        ELEMENTS.to_owned(),
-        json!({ "additionalProperties": element::schema_case(&payload.fragment) }),
-    );
+    let properties = fields::object([
+        (stage::PAYLOAD_KIND, json!({ "const": payload.kind })),
+        (PAYLOAD_VERSION, json!({ "const": payload.version })),
+        (
+            ELEMENTS,
+            json!({ "additionalProperties": element::schema_case(&payload.fragment) }),
+        ),
+    ]);
     json!({ "properties": properties })
 }

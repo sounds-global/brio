@@ -13,7 +13,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use brio_lens::json::{self, Value, json};
-use brio_lens::{Element, ElementTable, Payload, PayloadType, RecordInputs, Stage};
+use brio_lens::{
+    Element, ElementTable, Envelope, Payload, PayloadType, ReadError, RecordDefect, RecordInputs,
+    RecordReader, Stage,
+};
 
 /// A payload no phase owns: the reading of every sensor a module declares.
 #[derive(Debug, PartialEq)]
@@ -152,11 +155,73 @@ pub fn inputs(source: &str) -> RecordInputs {
     }
 }
 
+/// Where the workspace of the test called `test` is.
+fn workspace_path(test: &str) -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("records")
+        .join(test)
+}
+
+/// The build directory in the workspace of the test called `test`.
+pub fn build_directory(test: &str) -> PathBuf {
+    workspace_path(test).join(".brio")
+}
+
+/// The envelopes of the records in the build directory of `test`, read as a
+/// tool that knows no payload type reads them, in the order of their
+/// payload kinds and then of their modules.
+pub fn envelopes(test: &str) -> Vec<Envelope> {
+    let mut envelopes: Vec<Envelope> = RecordReader::in_build_directory(build_directory(test))
+        .read_all()
+        .expect("the records are read")
+        .into_iter()
+        .map(|record| record.expect("the record is whole").envelope)
+        .collect();
+    envelopes.sort_by(|left, right| {
+        (left.payload_kind(), left.module()).cmp(&(right.payload_kind(), right.module()))
+    });
+    envelopes
+}
+
+/// `depth` arrays nested inside each other, around nothing.
+pub fn nested(depth: usize) -> Value {
+    (0..depth).fold(Value::Null, |inner, _| json!([inner]))
+}
+
+/// A change that a tool outside the toolchain makes to a record.
+pub type Forge<'a> = &'a dyn Fn(&mut Value);
+
+/// Checks that each of `forgeries`, made to the one record `whole` of the
+/// build directory of `test`, which is written at `path`, gives a record
+/// that is rejected as corrupted although its digest matches.
+pub fn assert_forgeries_are_corrupted(
+    test: &str,
+    path: &Path,
+    whole: &Value,
+    forgeries: &[(&str, Forge)],
+) {
+    let reader = RecordReader::in_build_directory(build_directory(test));
+    for (what, forge) in forgeries {
+        let mut forged = whole.clone();
+        forge(&mut forged);
+        fs::write(path, resealed(forged)).expect("the record can be changed");
+        let read = reader.read_all().expect("the records are read");
+        assert!(
+            matches!(
+                read[..],
+                [Err(ReadError::Defective {
+                    defect: RecordDefect::Corrupted,
+                    ..
+                })]
+            ),
+            "a record with {what} is read"
+        );
+    }
+}
+
 /// An empty workspace for the test called `test`.
 pub fn workspace(test: &str) -> PathBuf {
-    let workspace = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("records")
-        .join(test);
+    let workspace = workspace_path(test);
     if workspace.exists() {
         fs::remove_dir_all(&workspace).expect("the old workspace can be removed");
     }

@@ -208,10 +208,19 @@ impl RecordReader {
         if !path.exists() {
             return Err(ReadError::Missing {
                 module: stage.module().to_owned(),
-                payload_kind: stage.payload_kind(),
+                payload_kind: P::KIND,
             });
         }
-        read_record(&path, &key)?.typed()
+        let record = read_record(&path, &key)?;
+        // The record key says which stage the record is for, and so does
+        // the record: one that names another has been changed since.
+        if record.envelope.stage() != stage.identity() {
+            return Err(ReadError::Defective {
+                path,
+                defect: RecordDefect::Corrupted,
+            });
+        }
+        record.typed()
     }
 
     /// Every record in the build directory, each with an untyped payload, in

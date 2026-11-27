@@ -15,8 +15,8 @@ use brio_lens::{
 };
 
 use support::{
-    Gauge, Loose, Probe, files_under, inputs, probe, resealed, stage, tamper, with_its_own_digest,
-    workspace,
+    Forge, Gauge, Loose, Probe, assert_forgeries_are_corrupted, envelopes, files_under, inputs,
+    nested, probe, resealed, stage, tamper, with_its_own_digest, workspace,
 };
 
 /// A payload of numbers that are not whole.
@@ -530,8 +530,7 @@ impl PayloadType for Nest {
 
 impl Payload for Nest {
     fn to_elements(&self, stage: &Stage<Self>) -> Vec<Element> {
-        let nested = (0..self.0).fold(Value::Null, |inner, _| json!([inner]));
-        vec![Element::new(stage.id(&["nest"]), nested)]
+        vec![Element::new(stage.id(&["nest"]), nested(self.0))]
     }
 
     fn from_elements(elements: &ElementTable) -> Option<Self> {
@@ -594,7 +593,7 @@ fn a_module_named_by_an_absolute_path_does_not_enter_lens() {
     ] {
         let error = Stage::<Probe>::of(module).expect_err("an absolute path is refused");
         assert!(
-            matches!(&error, RecordRefusal::AbsolutePath { module: refused } if refused == module),
+            matches!(&error, RecordRefusal::AbsoluteModulePath { module: refused } if refused == module),
             "{module} gives {error}"
         );
     }
@@ -666,20 +665,14 @@ fn outline(stage: &Stage<Loose>) -> Vec<Element> {
 
 #[test]
 fn an_element_names_its_parent_and_lists_its_children_in_order() {
-    let build_directory = workspace("tree").join(".brio");
+    let build_directory = workspace("outline").join(".brio");
     let stage = stage::<Loose>("app::main");
     RecordWriter::in_build_directory(&build_directory)
         .write(&stage, &inputs("sensor a\n"), &Loose(outline))
         .expect("the record is written");
 
-    let records = RecordReader::in_build_directory(&build_directory)
-        .read_all()
-        .expect("the records are read");
-    let elements = records[0]
-        .as_ref()
-        .expect("the record is whole")
-        .envelope
-        .elements();
+    let envelopes = envelopes("outline");
+    let elements = envelopes[0].elements();
 
     let document = stage.id(&["document"]);
     let install = stage.id(&["document", "install"]);
@@ -700,6 +693,42 @@ fn an_element_names_its_parent_and_lists_its_children_in_order() {
     assert_eq!(element(&flags).parent(), Some(&usage));
     assert_eq!(element(&flags).payload(), &json!("Flags"));
     assert_eq!(element(&appendix).children(), []);
+
+    // Each parent before its children, in their order.
+    let in_order: Vec<&Value> = elements.in_order().map(Element::payload).collect();
+    assert_eq!(
+        in_order,
+        ["Document", "Install", "Usage", "Flags", "Appendix"]
+    );
+}
+
+#[test]
+fn a_record_of_another_module_under_the_right_record_key_is_rejected() {
+    let build_directory = workspace("forged_module").join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = RecordWriter::in_build_directory(&build_directory)
+        .write(&stage, &inputs, &probe(&[("a", 7)]))
+        .expect("the record is written");
+    let text = fs::read_to_string(&path).expect("the record can be read");
+
+    // A whole record, with a digest to match, that says it is for another
+    // module than the one its record key was computed for.
+    let renamed = with_its_own_digest(&text.replacen(
+        r#""module": "app::main""#,
+        r#""module": "app::util""#,
+        1,
+    ));
+    fs::write(&path, renamed).expect("the record can be changed");
+    let read = RecordReader::in_build_directory(&build_directory).read(&stage, &inputs);
+
+    assert!(matches!(
+        read,
+        Err(ReadError::Defective {
+            defect: RecordDefect::Corrupted,
+            ..
+        })
+    ));
 }
 
 /// What the writer says when asked to write `elements`.
@@ -814,42 +843,26 @@ fn a_record_whose_element_table_breaks_its_rules_is_rejected_even_with_a_matchin
     let record = reader.read(&stage, &inputs).expect("the table holds");
     assert_eq!(record.envelope.elements().roots()[0].to_string(), appendix);
 
-    type Forge = fn(&mut Value, &[String]);
+    let missing = json!("0123456789abcdef0123456789abcdef");
     let forgeries: [(&str, Forge); 5] = [
-        ("a parent that is not in the record", |record, ids| {
-            record["elements"][&ids[2]]["parent"] = json!("0123456789abcdef0123456789abcdef");
+        ("a parent that is not in the record", &|record| {
+            record["elements"][&flags]["parent"] = missing.clone();
         }),
-        ("a child its parent does not list", |record, ids| {
-            record["elements"][&ids[1]]["children"] = json!([]);
+        ("a child its parent does not list", &|record| {
+            record["elements"][&usage]["children"] = json!([]);
         }),
-        ("a child listed under another parent", |record, ids| {
-            record["elements"][&ids[1]]["children"] = json!([]);
-            record["elements"][&ids[3]]["children"] = json!([ids[2]]);
+        ("a child listed under another parent", &|record| {
+            record["elements"][&usage]["children"] = json!([]);
+            record["elements"][&appendix]["children"] = json!([flags]);
         }),
-        ("a child listed twice", |record, ids| {
-            record["elements"][&ids[1]]["children"] = json!([ids[2], ids[2]]);
+        ("a child listed twice", &|record| {
+            record["elements"][&usage]["children"] = json!([flags, flags]);
         }),
-        ("a root that has a parent", |record, ids| {
-            record["roots"] = json!([ids[0], ids[3], ids[2]]);
+        ("a root that has a parent", &|record| {
+            record["roots"] = json!([document, appendix, flags]);
         }),
     ];
-    let ids = [document, usage, flags, appendix];
-    for (what, forge) in forgeries {
-        let mut forged = whole.clone();
-        forge(&mut forged, &ids);
-        fs::write(&path, resealed(forged)).expect("the record can be changed");
-        let read = reader.read(&stage, &inputs);
-        assert!(
-            matches!(
-                read,
-                Err(ReadError::Defective {
-                    defect: RecordDefect::Corrupted,
-                    ..
-                })
-            ),
-            "a record with {what} is read"
-        );
-    }
+    assert_forgeries_are_corrupted("forged_table", &path, &whole, &forgeries);
 }
 
 /// A payload that is the elements of another record, as they were read.
@@ -870,15 +883,7 @@ impl Payload for Copied {
     }
 
     fn from_elements(elements: &ElementTable) -> Option<Self> {
-        // Each parent before its children, in their order.
-        let mut ordered = Vec::new();
-        let mut next: Vec<_> = elements.roots().iter().rev().collect();
-        while let Some(id) = next.pop() {
-            let element = elements.get(id)?;
-            next.extend(element.children().iter().rev());
-            ordered.push(element.clone());
-        }
-        Some(Self(ordered))
+        Some(Self(elements.in_order().cloned().collect()))
     }
 }
 

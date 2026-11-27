@@ -2,17 +2,16 @@
 
 //! Reasons: why a phase decided what it decided.
 
-use crate::json::{Map, Value, json};
-use crate::provenance::{self, list_from_json};
+use crate::json::{Value, json};
 use crate::schema::{list_schema, object_schema, text_schema};
-use crate::{ElementLink, envelope};
+use crate::{ElementLink, envelope, fields, provenance};
 
 /// The JSON name of the decision of a reason.
 const DECISION: &str = "decision";
 /// The JSON name of the justification of a reason.
 const BECAUSE: &str = "because";
 /// The JSON name of the elements a reason involves.
-const ELEMENTS: &str = "elements";
+const INVOLVES: &str = "involves";
 
 /// The recorded justification for one decision a phase made about an
 /// element, such as the constraints behind an inferred type.
@@ -27,16 +26,14 @@ pub struct Reason {
     pub because: Value,
     /// The elements the justification is about, such as both accesses of a
     /// rejected borrow. Lens can find them, in any record.
-    pub elements: Vec<ElementLink>,
+    pub involves: Vec<ElementLink>,
 }
 
 impl Reason {
     /// How deep the justification of a reason can nest arrays and objects,
     /// as JSON. The record writer refuses any reason a reader could not read
     /// back.
-    // The justification is inside its reason, the reasons, their element,
-    // the elements and the record.
-    pub const MAX_DEPTH: usize = envelope::MAX_RECORD_DEPTH - 5;
+    pub const MAX_DEPTH: usize = envelope::MAX_REASON_DEPTH;
 
     /// The reason for `decision`, justified by `because`.
     #[must_use]
@@ -44,7 +41,7 @@ impl Reason {
         Self {
             decision: decision.to_owned(),
             because,
-            elements: Vec::new(),
+            involves: Vec::new(),
         }
     }
 
@@ -52,20 +49,17 @@ impl Reason {
     /// that `link` leads to.
     #[must_use]
     pub fn involving(mut self, link: ElementLink) -> Self {
-        self.elements.push(link);
+        self.involves.push(link);
         self
     }
 
     /// This reason as it is written in a record.
     pub(crate) fn to_json(&self) -> Value {
-        let mut reason = Map::new();
-        reason.insert(DECISION.to_owned(), Value::from(self.decision.as_str()));
-        reason.insert(BECAUSE.to_owned(), self.because.clone());
-        reason.insert(
-            ELEMENTS.to_owned(),
-            self.elements.iter().map(ElementLink::to_json).collect(),
-        );
-        Value::Object(reason)
+        fields::object([
+            (DECISION, Value::from(self.decision.as_str())),
+            (BECAUSE, self.because.clone()),
+            (INVOLVES, fields::list(&self.involves, ElementLink::to_json)),
+        ])
     }
 
     /// The reason written as `reason`, or `None` when `reason` is not one.
@@ -73,7 +67,7 @@ impl Reason {
         Some(Self {
             decision: reason.get(DECISION)?.as_str()?.to_owned(),
             because: reason.get(BECAUSE)?.clone(),
-            elements: list_from_json(reason.get(ELEMENTS)?, ElementLink::from_json)?,
+            involves: fields::list_from(reason.get(INVOLVES)?, ElementLink::from_json)?,
         })
     }
 }
@@ -97,7 +91,7 @@ pub(crate) fn schema() -> Value {
                 }),
             ),
             (
-                ELEMENTS,
+                INVOLVES,
                 list_schema(
                     "The elements the justification is about.",
                     provenance::LINK_DEFINITION,

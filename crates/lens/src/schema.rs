@@ -123,7 +123,7 @@ pub(crate) fn reference(name: &str) -> Value {
 }
 
 /// A JSON Schema of an object with `description`, in which every one of
-/// `properties` is required.
+/// `properties` is required and no other is admitted.
 pub(crate) fn object_schema(description: &str, properties: &[(&str, Value)]) -> Value {
     let required: Vec<&str> = properties.iter().map(|(name, _)| *name).collect();
     let properties: Map<String, Value> = properties
@@ -134,14 +134,15 @@ pub(crate) fn object_schema(description: &str, properties: &[(&str, Value)]) -> 
         "description": description,
         "type": "object",
         "required": required,
-        "properties": properties
+        "properties": properties,
+        "additionalProperties": false
     })
 }
 
-/// A JSON Schema of a list with `description`, of items that each meet the
-/// definition called `item`.
-pub(crate) fn list_schema(description: &str, item: &str) -> Value {
-    json!({ "description": description, "type": "array", "items": reference(item) })
+/// A JSON Schema of a list with `description`, of values that each meet the
+/// definition called `definition`.
+pub(crate) fn list_schema(description: &str, definition: &str) -> Value {
+    json!({ "description": description, "type": "array", "items": reference(definition) })
 }
 
 /// A JSON Schema of a text with `description`.
