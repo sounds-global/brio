@@ -2,9 +2,12 @@
 
 //! The envelope: what every record shares, whatever its payload.
 //!
-//! This module owns the envelope's fields and its version. The published
-//! schema describes what is defined here, and records are written and read
-//! here, so the two cannot drift.
+//! This module owns the envelope's fields and its version, and decides what
+//! a valid record is: every rule a record meets is applied here, the same
+//! when a record is made as when it is read. The published schema describes
+//! what is defined here, so records and schema cannot drift.
+
+use std::fmt;
 
 use crate::json::{Map, Value, json};
 
@@ -60,16 +63,12 @@ impl Envelope {
     /// stable identifier.
     pub const MAX_PAYLOAD_DEPTH: usize = 126;
 
-    /// The envelope of the record that the stage of payload `P` computes
-    /// from `inputs`.
-    pub(crate) fn of<P: Payload>(inputs: &RecordInputs) -> Result<Self, InvalidPayloadKind> {
-        let payload_kind = payload::kind_of::<P>()?;
-        Ok(Self {
-            key: inputs.key(payload_kind, P::VERSION),
-            module: inputs.module.clone(),
-            payload_kind: payload_kind.to_owned(),
-            payload_version: P::VERSION,
-        })
+    /// The key of the record that the stage of payload `P` computes from
+    /// `inputs`.
+    pub(crate) fn key_of<P: Payload>(
+        inputs: &RecordInputs,
+    ) -> Result<RecordKey, InvalidPayloadKind> {
+        Ok(inputs.key(payload::kind_of::<P>()?, P::VERSION))
     }
 
     /// The record key: the hash of every input of the record.
@@ -96,52 +95,85 @@ impl Envelope {
         self.payload_version
     }
 
-    /// The canonical JSON text of the record made of this envelope and
-    /// `payload`, with its digest.
-    pub(crate) fn seal(&self, payload: Value) -> String {
+    /// The record of what the stage of payload `P` produced, as `payload`,
+    /// from `inputs`: its envelope, and its canonical JSON text with its
+    /// digest.
+    pub(crate) fn seal<P: Payload>(
+        inputs: &RecordInputs,
+        payload: &P,
+    ) -> Result<(Self, String), RecordRefusal> {
+        let envelope = Self {
+            key: Self::key_of::<P>(inputs)?,
+            module: inputs.module.clone(),
+            payload_kind: P::KIND.to_owned(),
+            payload_version: P::VERSION,
+        };
+        if is_absolute_path(&envelope.module) {
+            return Err(RecordRefusal::AbsolutePath {
+                module: envelope.module,
+            });
+        }
+        let payload = payload.to_json();
+        let depth = canonical::depth(&payload);
+        if depth > Self::MAX_PAYLOAD_DEPTH {
+            return Err(RecordRefusal::PayloadTooDeep {
+                payload_kind: P::KIND,
+                depth,
+            });
+        }
+
         let mut record = Map::new();
         record.insert(ENVELOPE_VERSION.to_owned(), Value::from(Self::VERSION));
-        record.insert(KEY.to_owned(), Value::from(self.key.to_string()));
-        record.insert(MODULE.to_owned(), Value::from(self.module.as_str()));
+        record.insert(KEY.to_owned(), Value::from(envelope.key.to_string()));
+        record.insert(MODULE.to_owned(), Value::from(envelope.module.as_str()));
         record.insert(
             PAYLOAD_KIND.to_owned(),
-            Value::from(self.payload_kind.as_str()),
+            Value::from(envelope.payload_kind.as_str()),
         );
         record.insert(
             PAYLOAD_VERSION.to_owned(),
-            Value::from(self.payload_version),
+            Value::from(envelope.payload_version),
         );
         record.insert(PAYLOAD.to_owned(), payload);
         let digest = digest_of(record.clone());
         record.insert(DIGEST.to_owned(), Value::from(digest));
-        canonical::to_text(Value::Object(record))
+        Ok((envelope, canonical::to_text(Value::Object(record))))
     }
 
-    /// The envelope and the payload of the record written as `text`.
+    /// The envelope and the payload of the record written as `text`, which
+    /// is stored under the record key `stored_under`.
     ///
     /// The envelope version is checked first: no other field of a record
     /// with another envelope version is interpreted.
-    pub(crate) fn open(text: &str) -> Result<(Self, Value), Unreadable> {
+    pub(crate) fn open(
+        text: &str,
+        stored_under: &RecordKey,
+    ) -> Result<(Self, Value), RecordDefect> {
+        // The JSON reader stops at the depth the writer refuses beyond, so a
+        // record with a deeper payload is not read as a record at all.
         let Ok(Value::Object(mut record)) = crate::json::from_str(text) else {
-            return Err(Unreadable::Corrupted);
+            return Err(RecordDefect::Corrupted);
         };
 
         let found = record
             .get(ENVELOPE_VERSION)
             .and_then(Value::as_u64)
-            .ok_or(Unreadable::Corrupted)?;
+            .ok_or(RecordDefect::Corrupted)?;
         if found != u64::from(Self::VERSION) {
-            return Err(Unreadable::UnsupportedEnvelopeVersion { found });
+            return Err(RecordDefect::UnsupportedEnvelopeVersion {
+                found,
+                supported: Self::VERSION,
+            });
         }
 
         // A record is only ever written as canonical JSON, so any other
         // text has been changed since, even when it means the same.
         if canonical::to_text(Value::Object(record.clone())) != text {
-            return Err(Unreadable::Corrupted);
+            return Err(RecordDefect::Corrupted);
         }
-        let digest = record.remove(DIGEST).ok_or(Unreadable::Corrupted)?;
+        let digest = record.remove(DIGEST).ok_or(RecordDefect::Corrupted)?;
         if digest.as_str() != Some(digest_of(record.clone()).as_str()) {
-            return Err(Unreadable::Corrupted);
+            return Err(RecordDefect::Corrupted);
         }
 
         let text_of = |record: &Map<String, Value>, field: &str| {
@@ -149,34 +181,132 @@ impl Envelope {
                 .get(field)
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .ok_or(Unreadable::Corrupted)
+                .ok_or(RecordDefect::Corrupted)
         };
         let envelope = Self {
-            key: RecordKey::from_hex(text_of(&record, KEY)?).ok_or(Unreadable::Corrupted)?,
+            key: RecordKey::from_hex(text_of(&record, KEY)?).ok_or(RecordDefect::Corrupted)?,
             module: text_of(&record, MODULE)?,
             payload_kind: text_of(&record, PAYLOAD_KIND)?,
             payload_version: record
                 .get(PAYLOAD_VERSION)
                 .and_then(Value::as_u64)
                 .and_then(|version| u32::try_from(version).ok())
-                .ok_or(Unreadable::Corrupted)?,
+                .ok_or(RecordDefect::Corrupted)?,
         };
-        let payload = record.remove(PAYLOAD).ok_or(Unreadable::Corrupted)?;
+        // What the writer refuses is not a record, whatever its digest says.
+        if is_absolute_path(&envelope.module) {
+            return Err(RecordDefect::Corrupted);
+        }
+        if envelope.key != *stored_under {
+            return Err(RecordDefect::Stale);
+        }
+        let payload = record.remove(PAYLOAD).ok_or(RecordDefect::Corrupted)?;
         Ok((envelope, payload))
     }
 }
 
-/// Why a text is not a record this toolchain can read.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Unreadable {
-    /// The text is not a record, is not canonical JSON, or does not match
-    /// its digest.
+/// Whether `module` is named by an absolute path, on any platform: from a
+/// root (`/…`, `\…`), a home directory (`~…`) or a drive (`C:\…`).
+fn is_absolute_path(module: &str) -> bool {
+    let module = module.as_bytes();
+    let from_a_drive = module.len() >= 3
+        && module[0].is_ascii_alphabetic()
+        && module[1] == b':'
+        && matches!(module[2], b'/' | b'\\');
+    matches!(module.first(), Some(b'/' | b'\\' | b'~')) || from_a_drive
+}
+
+/// Why Lens refuses to make a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordRefusal {
+    /// The payload declares an invalid payload kind.
+    InvalidPayloadKind(InvalidPayloadKind),
+    /// The module is named by an absolute path, which no record holds.
+    AbsolutePath {
+        /// The module as named in the inputs.
+        module: String,
+    },
+    /// The payload nests deeper than [`Envelope::MAX_PAYLOAD_DEPTH`], so no
+    /// reader could read the record back.
+    PayloadTooDeep {
+        /// The payload kind of the payload.
+        payload_kind: &'static str,
+        /// How deep the payload nests.
+        depth: usize,
+    },
+}
+
+impl fmt::Display for RecordRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPayloadKind(error) => error.fmt(f),
+            Self::AbsolutePath { module } => write!(
+                f,
+                "the module `{module}` is named by an absolute path, which a record never holds"
+            ),
+            Self::PayloadTooDeep {
+                payload_kind,
+                depth,
+            } => write!(
+                f,
+                "the `{payload_kind}` payload nests {depth} deep, but a record holds at most {} \
+                 levels",
+                Envelope::MAX_PAYLOAD_DEPTH
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RecordRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidPayloadKind(error) => Some(error),
+            Self::AbsolutePath { .. } | Self::PayloadTooDeep { .. } => None,
+        }
+    }
+}
+
+impl From<InvalidPayloadKind> for RecordRefusal {
+    fn from(error: InvalidPayloadKind) -> Self {
+        Self::InvalidPayloadKind(error)
+    }
+}
+
+/// Why a stored text is not a record this toolchain trusts.
+///
+/// It reads as the end of a sentence about the record, as in "the record
+/// `…` is corrupted".
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordDefect {
+    /// The text is not a record as Lens writes it, or does not match its
+    /// digest.
     Corrupted,
-    /// The record has an envelope version other than [`Envelope::VERSION`].
+    /// The record was computed from other inputs than those of the record
+    /// key it is stored under.
+    Stale,
+    /// The record has an envelope version this toolchain does not read.
     UnsupportedEnvelopeVersion {
         /// The envelope version of the record.
         found: u64,
+        /// The envelope version this toolchain reads: [`Envelope::VERSION`].
+        supported: u32,
     },
+}
+
+impl fmt::Display for RecordDefect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Corrupted => f.write_str("is corrupted"),
+            Self::Stale => f.write_str("is stale: it was computed from other inputs"),
+            Self::UnsupportedEnvelopeVersion { found, supported } => write!(
+                f,
+                "has envelope version {found}, but this toolchain reads envelope version \
+                 {supported}"
+            ),
+        }
+    }
 }
 
 /// The digest of a record: the BLAKE3, in lowercase hexadecimal, of the

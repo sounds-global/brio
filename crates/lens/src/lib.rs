@@ -21,7 +21,7 @@ mod schema;
 /// own, so every phase shares one version of the model.
 pub use serde_json as json;
 
-pub use envelope::Envelope;
+pub use envelope::{Envelope, RecordDefect, RecordRefusal};
 pub use identity::StableId;
 pub use inputs::{RecordInputs, RecordKey};
 pub use payload::{InvalidPayloadKind, Payload, PayloadSchema};

@@ -30,17 +30,6 @@ pub struct RecordInputs {
 }
 
 impl RecordInputs {
-    /// Whether the module is named by an absolute path, on any platform:
-    /// from a root (`/…`, `\…`), a home directory (`~…`) or a drive (`C:\…`).
-    pub(crate) fn module_is_an_absolute_path(&self) -> bool {
-        let module = self.module.as_bytes();
-        let from_a_drive = module.len() >= 3
-            && module[0].is_ascii_alphabetic()
-            && module[1] == b':'
-            && matches!(module[2], b'/' | b'\\');
-        matches!(module.first(), Some(b'/' | b'\\' | b'~')) || from_a_drive
-    }
-
     /// The key of the record that the stage with this payload kind and
     /// payload version computes from these inputs.
     pub(crate) fn key(&self, payload_kind: &str, payload_version: u32) -> RecordKey {

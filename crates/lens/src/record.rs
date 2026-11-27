@@ -8,10 +8,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::envelope::Unreadable;
+use crate::envelope::{RecordDefect, RecordRefusal};
 use crate::json::Value;
 use crate::payload::{self, InvalidPayloadKind, Payload};
-use crate::{Envelope, RecordInputs, RecordKey, canonical};
+use crate::{Envelope, RecordInputs, RecordKey};
 
 /// A record: the envelope and the payload it wraps.
 ///
@@ -86,30 +86,14 @@ impl RecordWriter {
     ///
     /// # Errors
     ///
-    /// Fails when the payload kind of `P` breaks the rule on
-    /// [`Payload::KIND`], when the module of `inputs` is named by an
-    /// absolute path, when the payload nests deeper than
-    /// [`Envelope::MAX_PAYLOAD_DEPTH`], or when the file cannot be written.
+    /// Fails when Lens refuses to make the record, for a [`RecordRefusal`],
+    /// or when the file cannot be written.
     pub fn write<P: Payload>(
         &self,
         inputs: &RecordInputs,
         payload: &P,
     ) -> Result<PathBuf, WriteError> {
-        let envelope = Envelope::of::<P>(inputs)?;
-        if inputs.module_is_an_absolute_path() {
-            return Err(WriteError::AbsolutePath {
-                module: inputs.module.clone(),
-            });
-        }
-        let payload = payload.to_json();
-        let depth = canonical::depth(&payload);
-        if depth > Envelope::MAX_PAYLOAD_DEPTH {
-            return Err(WriteError::PayloadTooDeep {
-                payload_kind: P::KIND,
-                depth,
-            });
-        }
-        let text = envelope.seal(payload);
+        let (envelope, text) = Envelope::seal(inputs, payload)?;
 
         let path = record_path(&self.directory, &envelope.key);
         // A reader never sees half a record: the file appears under its
@@ -141,21 +125,8 @@ impl RecordWriter {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum WriteError {
-    /// The payload declares an invalid payload kind.
-    InvalidPayloadKind(InvalidPayloadKind),
-    /// The module is named by an absolute path, which no record holds.
-    AbsolutePath {
-        /// The module as named in the inputs.
-        module: String,
-    },
-    /// The payload nests deeper than [`Envelope::MAX_PAYLOAD_DEPTH`], so no
-    /// reader could read the record back.
-    PayloadTooDeep {
-        /// The payload kind of the payload.
-        payload_kind: &'static str,
-        /// How deep the payload nests.
-        depth: usize,
-    },
+    /// Lens refuses to make the record.
+    Refused(RecordRefusal),
     /// The record's file could not be written.
     Io {
         /// The file of the record.
@@ -168,20 +139,7 @@ pub enum WriteError {
 impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidPayloadKind(error) => error.fmt(f),
-            Self::AbsolutePath { module } => write!(
-                f,
-                "the module `{module}` is named by an absolute path, which a record never holds"
-            ),
-            Self::PayloadTooDeep {
-                payload_kind,
-                depth,
-            } => write!(
-                f,
-                "the `{payload_kind}` payload nests {depth} deep, but a record holds at most {} \
-                 levels",
-                Envelope::MAX_PAYLOAD_DEPTH
-            ),
+            Self::Refused(refusal) => refusal.fmt(f),
             Self::Io { path, error } => {
                 write!(
                     f,
@@ -196,24 +154,21 @@ impl fmt::Display for WriteError {
 impl std::error::Error for WriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidPayloadKind(error) => Some(error),
+            Self::Refused(refusal) => refusal.source(),
             Self::Io { error, .. } => Some(error),
-            Self::AbsolutePath { .. } | Self::PayloadTooDeep { .. } => None,
         }
     }
 }
 
-impl From<InvalidPayloadKind> for WriteError {
-    fn from(error: InvalidPayloadKind) -> Self {
-        Self::InvalidPayloadKind(error)
+impl From<RecordRefusal> for WriteError {
+    fn from(refusal: RecordRefusal) -> Self {
+        Self::Refused(refusal)
     }
 }
 
 /// Reads the records of a build directory.
 ///
-/// Every record is checked before it is given out: its text is canonical
-/// JSON and matches its digest, and its record key is the one it is stored
-/// under.
+/// No record is given out with a [`RecordDefect`].
 #[derive(Debug)]
 pub struct RecordReader {
     directory: PathBuf,
@@ -232,17 +187,15 @@ impl RecordReader {
     ///
     /// # Errors
     ///
-    /// Fails when there is no record for these inputs, when the record is
-    /// corrupted or stale, when its envelope version is not
-    /// [`Envelope::VERSION`], or when its payload is not a `P`.
+    /// Fails when there is no record for these inputs, when the record has
+    /// a [`RecordDefect`], or when its payload is not a `P`.
     pub fn read<P: Payload>(&self, inputs: &RecordInputs) -> Result<Record<P>, ReadError> {
-        let payload_kind = payload::kind_of::<P>()?;
-        let key = inputs.key(payload_kind, P::VERSION);
+        let key = Envelope::key_of::<P>(inputs)?;
         let path = record_path(&self.directory, &key);
         if !path.exists() {
             return Err(ReadError::Missing {
                 module: inputs.module.clone(),
-                payload_kind,
+                payload_kind: P::KIND,
             });
         }
         read_record(&path, &key)?.typed()
@@ -283,8 +236,11 @@ impl RecordReader {
         let read = |path: &PathBuf| {
             // A record is stored under its record key and under no other name.
             let name = path.file_stem().unwrap_or_default().to_string_lossy();
-            let stored_under = RecordKey::from_hex(name.into_owned())
-                .ok_or_else(|| ReadError::Corrupted { path: path.clone() })?;
+            let stored_under =
+                RecordKey::from_hex(name.into_owned()).ok_or_else(|| ReadError::Defective {
+                    path: path.clone(),
+                    defect: RecordDefect::Corrupted,
+                })?;
             read_record(path, &stored_under)
         };
         Ok(paths.iter().map(read).collect())
@@ -293,27 +249,16 @@ impl RecordReader {
 
 /// The record in `file`, which is stored under the key `stored_under`.
 fn read_record(file: &Path, stored_under: &RecordKey) -> Result<Record<Value>, ReadError> {
-    let path = || file.to_owned();
-    let text = match fs::read(file) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|_| ReadError::Corrupted { path: path() })?,
-        Err(error) => {
-            return Err(ReadError::Io {
-                path: path(),
-                error,
-            });
-        }
+    let defective = |defect| ReadError::Defective {
+        path: file.to_owned(),
+        defect,
     };
-    let (envelope, payload) = Envelope::open(&text).map_err(|unreadable| match unreadable {
-        Unreadable::Corrupted => ReadError::Corrupted { path: path() },
-        Unreadable::UnsupportedEnvelopeVersion { found } => ReadError::UnsupportedEnvelopeVersion {
-            path: path(),
-            found,
-            supported: Envelope::VERSION,
-        },
+    let bytes = fs::read(file).map_err(|error| ReadError::Io {
+        path: file.to_owned(),
+        error,
     })?;
-    if envelope.key != *stored_under {
-        return Err(ReadError::Stale { path: path() });
-    }
+    let text = String::from_utf8(bytes).map_err(|_| defective(RecordDefect::Corrupted))?;
+    let (envelope, payload) = Envelope::open(&text, stored_under).map_err(defective)?;
     Ok(Record { envelope, payload })
 }
 
@@ -335,26 +280,12 @@ pub enum ReadError {
         /// What the file system reported.
         error: io::Error,
     },
-    /// The file is not a record as Lens writes it, or its fields do not
-    /// match its digest.
-    Corrupted {
+    /// The file does not hold a record this toolchain trusts.
+    Defective {
         /// The file of the record.
         path: PathBuf,
-    },
-    /// The record was computed from other inputs than those of the record
-    /// key it is stored under.
-    Stale {
-        /// The file of the record.
-        path: PathBuf,
-    },
-    /// The record has an envelope version this toolchain does not read.
-    UnsupportedEnvelopeVersion {
-        /// The file of the record.
-        path: PathBuf,
-        /// The envelope version of the record.
-        found: u64,
-        /// The envelope version this toolchain reads: [`Envelope::VERSION`].
-        supported: u32,
+        /// What is wrong with it.
+        defect: RecordDefect,
     },
     /// The record holds another payload than the payload type asked for.
     WrongPayload {
@@ -389,24 +320,9 @@ impl fmt::Display for ReadError {
                 "there is no `{payload_kind}` record of module `{module}` for these inputs"
             ),
             Self::Io { path, error } => write!(f, "`{}` cannot be read: {error}", path.display()),
-            Self::Corrupted { path } => {
-                write!(f, "the record `{}` is corrupted", path.display())
+            Self::Defective { path, defect } => {
+                write!(f, "the record `{}` {defect}", path.display())
             }
-            Self::Stale { path } => write!(
-                f,
-                "the record `{}` is stale: it was computed from other inputs",
-                path.display()
-            ),
-            Self::UnsupportedEnvelopeVersion {
-                path,
-                found,
-                supported,
-            } => write!(
-                f,
-                "the record `{}` has envelope version {found}, but this toolchain reads \
-                 envelope version {supported}",
-                path.display()
-            ),
             Self::WrongPayload {
                 found_kind,
                 found_version,

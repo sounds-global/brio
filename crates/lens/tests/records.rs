@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use brio_lens::json::{Value, json};
 use brio_lens::{
-    Envelope, InvalidPayloadKind, Payload, ReadError, RecordInputs, RecordReader, RecordWriter,
-    StableId, WriteError,
+    Envelope, InvalidPayloadKind, Payload, ReadError, RecordDefect, RecordInputs, RecordReader,
+    RecordRefusal, RecordWriter, StableId, WriteError,
 };
 
 /// A payload no phase owns: the reading of every sensor a module declares.
@@ -348,9 +348,21 @@ fn a_corrupted_record_is_rejected_not_trusted() {
 
     tamper(&path, r#""value": 7"#, r#""value": 8"#);
     let changed = reader.read::<Probe>(&inputs);
-    assert!(matches!(changed, Err(ReadError::Corrupted { .. })));
+    assert!(matches!(
+        changed,
+        Err(ReadError::Defective {
+            defect: RecordDefect::Corrupted,
+            ..
+        })
+    ));
     let all = reader.read_all().expect("the records are read");
-    assert!(matches!(all[..], [Err(ReadError::Corrupted { .. })]));
+    assert!(matches!(
+        all[..],
+        [Err(ReadError::Defective {
+            defect: RecordDefect::Corrupted,
+            ..
+        })]
+    ));
 
     tamper(&path, r#""value": 8"#, r#""value": 7"#);
     reader
@@ -358,11 +370,23 @@ fn a_corrupted_record_is_rejected_not_trusted() {
         .expect("the record is whole again");
     tamper(&path, r#""value": 7"#, r#""value":  7"#);
     let respaced = reader.read::<Probe>(&inputs);
-    assert!(matches!(respaced, Err(ReadError::Corrupted { .. })));
+    assert!(matches!(
+        respaced,
+        Err(ReadError::Defective {
+            defect: RecordDefect::Corrupted,
+            ..
+        })
+    ));
 
     fs::write(&path, "{ \"envelope_version\": 1,").expect("the record can be cut short");
     let cut_short = reader.read::<Probe>(&inputs);
-    assert!(matches!(cut_short, Err(ReadError::Corrupted { .. })));
+    assert!(matches!(
+        cut_short,
+        Err(ReadError::Defective {
+            defect: RecordDefect::Corrupted,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -385,9 +409,11 @@ fn an_unsupported_envelope_version_is_rejected_naming_the_found_and_supported_ve
 
     assert!(matches!(
         error,
-        ReadError::UnsupportedEnvelopeVersion {
-            found: 2,
-            supported: 1,
+        ReadError::Defective {
+            defect: RecordDefect::UnsupportedEnvelopeVersion {
+                found: 2,
+                supported: 1,
+            },
             ..
         }
     ));
@@ -452,6 +478,67 @@ fn a_change_to_any_input_gives_another_record_key() {
     ));
 }
 
+/// The record `text` with the digest the published schema describes: the
+/// BLAKE3 of the record without its digest field. Worked out here, without
+/// Lens, as any tool outside the toolchain would.
+fn with_its_own_digest(text: &str) -> String {
+    let (digest_line, rest) = text
+        .strip_prefix("{\n")
+        .and_then(|fields| fields.split_once('\n'))
+        .expect("the digest is the first field of a record");
+    assert!(digest_line.starts_with(r#"  "digest": ""#), "{digest_line}");
+    let without_digest = format!("{{\n{rest}");
+    let digest = blake3::hash(without_digest.as_bytes()).to_hex();
+    format!("{{\n  \"digest\": \"{digest}\",\n{rest}")
+}
+
+#[test]
+fn the_digest_of_a_record_is_the_one_the_published_schema_describes() {
+    let build_directory = workspace("digest").join(".brio");
+    let path = RecordWriter::in_build_directory(&build_directory)
+        .write(&inputs("sensor a\n"), &probe("app::main", &[("a", 7)]))
+        .expect("the record is written");
+
+    let text = fs::read_to_string(path).expect("the record can be read");
+
+    assert_eq!(with_its_own_digest(&text), text);
+}
+
+#[test]
+fn a_record_the_writer_would_refuse_is_rejected_even_with_a_matching_digest() {
+    let build_directory = workspace("forged").join(".brio");
+    let inputs = inputs("sensor a\n");
+    let path = RecordWriter::in_build_directory(&build_directory)
+        .write(&inputs, &probe("app::main", &[("a", 7)]))
+        .expect("the record is written");
+    let reader = RecordReader::in_build_directory(&build_directory);
+    let text = fs::read_to_string(&path).expect("the record can be read");
+
+    // A changed value with a digest to match reads as a whole record: the
+    // digest guards against accidents, and only the record key ties a
+    // record to its inputs.
+    let revalued = with_its_own_digest(&text.replacen(r#""value": 7"#, r#""value": 8"#, 1));
+    fs::write(&path, revalued).expect("the record can be changed");
+    let record = reader.read::<Probe>(&inputs).expect("the digest matches");
+    assert_eq!(record.payload.readings[0].value, 8);
+
+    let renamed = with_its_own_digest(&text.replacen(
+        r#""module": "app::main""#,
+        r#""module": "/home/ada/app/main.brio""#,
+        1,
+    ));
+    assert_ne!(renamed, text);
+    fs::write(&path, renamed).expect("the record can be changed");
+    let read = reader.read::<Probe>(&inputs);
+    assert!(matches!(
+        read,
+        Err(ReadError::Defective {
+            defect: RecordDefect::Corrupted,
+            ..
+        })
+    ));
+}
+
 #[test]
 fn a_stale_record_is_rejected_not_trusted() {
     let build_directory = workspace("stale").join(".brio");
@@ -469,7 +556,13 @@ fn a_stale_record_is_rejected_not_trusted() {
     fs::copy(&old_path, &new_path).expect("the old record can be copied");
     let read = RecordReader::in_build_directory(&build_directory).read::<Probe>(&new_inputs);
 
-    assert!(matches!(read, Err(ReadError::Stale { .. })));
+    assert!(matches!(
+        read,
+        Err(ReadError::Defective {
+            defect: RecordDefect::Stale,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -499,7 +592,15 @@ fn a_record_that_cannot_be_read_hides_no_other_record() {
     assert_eq!(whole, ["gauge"]);
     let corrupted = records
         .iter()
-        .filter(|record| matches!(record, Err(ReadError::Corrupted { .. })))
+        .filter(|record| {
+            matches!(
+                record,
+                Err(ReadError::Defective {
+                    defect: RecordDefect::Corrupted,
+                    ..
+                })
+            )
+        })
         .count();
     assert_eq!(corrupted, 2);
 }
@@ -551,10 +652,10 @@ fn a_payload_is_read_back_at_the_deepest_nesting_and_refused_beyond_it() {
         .expect_err("no reader could read this payload back");
     assert!(matches!(
         error,
-        WriteError::PayloadTooDeep {
+        WriteError::Refused(RecordRefusal::PayloadTooDeep {
             payload_kind: "nest",
             depth: 127
-        }
+        })
     ));
     assert_eq!(
         error.to_string(),
@@ -582,7 +683,7 @@ fn a_module_named_by_an_absolute_path_is_not_written() {
             .write(&inputs, &probe(module, &[("a", 7)]))
             .expect_err("an absolute path is refused");
         assert!(
-            matches!(&error, WriteError::AbsolutePath { module: refused } if refused == module),
+            matches!(&error, WriteError::Refused(RecordRefusal::AbsolutePath { module: refused }) if refused == module),
             "{module} gives {error}"
         );
     }
@@ -648,9 +749,9 @@ fn a_payload_with_an_invalid_payload_kind_is_not_written() {
 
     assert!(matches!(
         error,
-        WriteError::InvalidPayloadKind(InvalidPayloadKind {
+        WriteError::Refused(RecordRefusal::InvalidPayloadKind(InvalidPayloadKind {
             payload_kind: "probe.3+gauge"
-        })
+        }))
     ));
     assert_eq!(files_under(&workspace), Vec::<PathBuf>::new());
     assert_eq!(
