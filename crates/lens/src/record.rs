@@ -136,13 +136,63 @@ impl fmt::Display for UnfinishedName {
 /// stopped.
 const UNFINISHED_NAMES_TRIED: usize = 64;
 
-/// Whether `file` is a file and holds the record with the text `text`,
-/// whole.
-fn holds_record(file: &Path, text: &str) -> bool {
-    // Only a file is read: reading what else can have the name, such as a
-    // pipe, may never end.
-    fs::metadata(file).is_ok_and(|metadata| metadata.is_file())
-        && fs::read(file).is_ok_and(|held| held == text.as_bytes())
+/// A complete record, and the file it belongs in.
+struct RecordFile<'a> {
+    /// The file with the name of the record.
+    file: &'a Path,
+    /// The record, as canonical JSON text.
+    text: &'a str,
+}
+
+/// How a complete record came to be in its place.
+#[derive(Debug, PartialEq, Eq)]
+enum Placed {
+    /// The record is there, and the unfinished name is still a name of this
+    /// writer's file.
+    BesideUnfinished,
+    /// The unfinished file was renamed: its unfinished name is free.
+    Renamed,
+}
+
+impl RecordFile<'_> {
+    /// Whether the file is there, is a file and holds the record, whole.
+    fn is_there(&self) -> bool {
+        // Only a file is read: reading what else can have the name, such
+        // as a pipe, may never end.
+        fs::metadata(self.file).is_ok_and(|metadata| metadata.is_file())
+            && fs::read(self.file).is_ok_and(|held| held == self.text.as_bytes())
+    }
+
+    /// Puts the record, which is complete in the file `unfinished`, in its
+    /// place.
+    fn put_in_place(&self, unfinished: &Path) -> io::Result<Placed> {
+        // A second name for the same file takes the place of nothing, so no
+        // record is gone for a moment. It fails when the record's file is
+        // there, and where the file system gives no second name to a file.
+        // When it fails because another writer put the same record there
+        // meanwhile, there is nothing left to do.
+        if fs::hard_link(unfinished, self.file).is_ok() || self.is_there() {
+            return Ok(Placed::BesideUnfinished);
+        }
+        // The record is renamed into its place, and onto what is there: a
+        // corrupted record, a record of the same record key that a stage
+        // made otherwise, or something that is no record. Nothing is there
+        // when the file system only gave the record no second name.
+        fs::rename(unfinished, self.file).map(|()| Placed::Renamed)
+    }
+}
+
+/// Removes the unfinished name `unfinished` of a writer that is done with
+/// it, having put its record in place as `placed` says, or failed to.
+///
+/// Nothing of a writer's unfinished record stays behind, written or not.
+/// Once the file was renamed, though, the name is this writer's no more:
+/// what has it since is the unfinished record of another, and is left.
+fn discard_unfinished(unfinished: &Path, placed: &io::Result<Placed>) {
+    if !matches!(placed, Ok(Placed::Renamed)) {
+        // When the write failed, that is the error to report.
+        let _ = fs::remove_file(unfinished);
+    }
 }
 
 /// Makes, in `records_directory`, the file of an unfinished record with
@@ -174,51 +224,17 @@ fn new_unfinished_file(records_directory: &Path, key: &RecordKey) -> io::Result<
     ))
 }
 
-/// Writes the record with `key` and the text `text` into `records_directory`,
-/// under the name of that record.
-fn write_record(records_directory: &Path, key: &RecordKey, text: &str) -> io::Result<()> {
+/// Writes `record`, which has the record key `key`, into `records_directory`.
+fn write_record(records_directory: &Path, key: &RecordKey, record: &RecordFile) -> io::Result<()> {
     fs::create_dir_all(records_directory)?;
     // A reader never sees half a record: the record is written under an
     // unfinished name, and gets its own name only once it is complete.
     let (unfinished, mut file) = new_unfinished_file(records_directory, key)?;
     let placed = file
-        .write_all(text.as_bytes())
-        .and_then(|()| put_in_place(&unfinished, &record_path(records_directory, key), text));
-    // Nothing of this writer's unfinished record stays behind, written or
-    // not. Once the record was renamed, the name is this writer's no more:
-    // what has it since is the unfinished record of another, and is left.
-    // When the write failed, that is the error to report.
-    if !matches!(placed, Ok(Placed::Renamed)) {
-        let _ = fs::remove_file(&unfinished);
-    }
+        .write_all(record.text.as_bytes())
+        .and_then(|()| record.put_in_place(&unfinished));
+    discard_unfinished(&unfinished, &placed);
     placed.map(|_| ())
-}
-
-/// How a complete record came to be in its place.
-enum Placed {
-    /// The record is there, and the unfinished name is still a name of this
-    /// writer's file.
-    BesideUnfinished,
-    /// The unfinished file was renamed: its unfinished name is free.
-    Renamed,
-}
-
-/// Puts the complete record in `unfinished`, with the text `text`, in its
-/// place, `file`.
-fn put_in_place(unfinished: &Path, file: &Path, text: &str) -> io::Result<Placed> {
-    // A second name for the same file takes the place of nothing, so no
-    // record is gone for a moment. It fails when `file` is there, and where
-    // the file system gives no second name to a file. When it fails because
-    // another writer put the same record there meanwhile, there is nothing
-    // left to do.
-    if fs::hard_link(unfinished, file).is_ok() || holds_record(file, text) {
-        return Ok(Placed::BesideUnfinished);
-    }
-    // The record is renamed into its place, and onto what is there: a
-    // corrupted record, a record of the same record key that a stage made
-    // otherwise, or something that is no record. Nothing is there when the
-    // file system only gave the record no second name.
-    fs::rename(unfinished, file).map(|()| Placed::Renamed)
 }
 
 /// Writes records into a build directory, or, when Lens is off, drops them.
@@ -293,13 +309,16 @@ impl RecordWriter {
         // A record that is there already stays as it is. Nothing is put in
         // its place, not even the same record: to a reader that lists the
         // records meanwhile, a file that is replaced can be gone.
-        if holds_record(&path, &text) {
-            return Ok(Some(path));
+        let record = RecordFile {
+            file: &path,
+            text: &text,
+        };
+        if !record.is_there() {
+            write_record(directory, envelope.key(), &record).map_err(|error| WriteError::Io {
+                path: path.clone(),
+                error,
+            })?;
         }
-        write_record(directory, envelope.key(), &text).map_err(|error| WriteError::Io {
-            path: path.clone(),
-            error,
-        })?;
         Ok(Some(path))
     }
 }
@@ -577,5 +596,100 @@ impl std::error::Error for ReadError {
             Self::Io { error, .. } => Some(error),
             _ => None,
         }
+    }
+}
+
+/// The steps of a writer that only a second writer, at the wrong moment,
+/// would show through the public interface. Each is run here on its own,
+/// with the files as that second writer would leave them.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty directory for the test called `test`.
+    fn directory(test: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("brio_lens-record-{}-{test}", std::process::id()));
+        // The directory is there only when an earlier run was stopped.
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("the directory can be created");
+        directory
+    }
+
+    #[test]
+    fn the_same_record_put_in_place_by_another_writer_meanwhile_is_left_as_it_is() {
+        let directory = directory("same_record_meanwhile");
+        let (file, unfinished) = (directory.join("record"), directory.join("unfinished"));
+        fs::write(&unfinished, "the record\n").expect("the unfinished record can be written");
+        // Another writer put the same record in place since this one looked.
+        fs::write(&file, "the record\n").expect("the record can be written");
+        let same_file = directory.join("same-file");
+        fs::hard_link(&file, &same_file).expect("the record can be given a second name");
+
+        let record = RecordFile {
+            file: &file,
+            text: "the record\n",
+        };
+        let placed = record.put_in_place(&unfinished);
+
+        assert_eq!(placed.ok(), Some(Placed::BesideUnfinished));
+        // No other file took the place of the record: what is written under
+        // its other name is read under its own.
+        fs::write(&same_file, "the same file\n").expect("the file can be written");
+        assert_eq!(
+            fs::read_to_string(&file).ok().as_deref(),
+            Some("the same file\n")
+        );
+        fs::remove_dir_all(directory).expect("the directory can be removed");
+    }
+
+    #[test]
+    fn an_unfinished_name_that_was_renamed_away_is_left_to_the_writer_that_has_it_since() {
+        let directory = directory("renamed_away");
+        let (file, unfinished) = (directory.join("record"), directory.join("unfinished"));
+        fs::write(&unfinished, "the record\n").expect("the unfinished record can be written");
+        fs::write(&file, "a corrupted record\n").expect("the record can be written");
+
+        let record = RecordFile {
+            file: &file,
+            text: "the record\n",
+        };
+        let placed = record.put_in_place(&unfinished);
+        // Another writer takes the name, which is free since the rename.
+        fs::write(&unfinished, "of another writer\n").expect("the name can be taken");
+        discard_unfinished(&unfinished, &placed);
+
+        assert_eq!(placed.ok(), Some(Placed::Renamed));
+        assert_eq!(
+            fs::read_to_string(&file).ok().as_deref(),
+            Some("the record\n")
+        );
+        assert_eq!(
+            fs::read_to_string(&unfinished).ok().as_deref(),
+            Some("of another writer\n")
+        );
+        fs::remove_dir_all(directory).expect("the directory can be removed");
+    }
+
+    #[test]
+    fn an_unfinished_name_that_is_still_the_writers_own_is_removed() {
+        let directory = directory("still_its_own");
+        let (file, unfinished) = (directory.join("record"), directory.join("unfinished"));
+        fs::write(&unfinished, "the record\n").expect("the unfinished record can be written");
+
+        let record = RecordFile {
+            file: &file,
+            text: "the record\n",
+        };
+        let placed = record.put_in_place(&unfinished);
+        discard_unfinished(&unfinished, &placed);
+
+        assert_eq!(placed.ok(), Some(Placed::BesideUnfinished));
+        assert_eq!(
+            fs::read_to_string(&file).ok().as_deref(),
+            Some("the record\n")
+        );
+        assert!(!unfinished.exists());
+        fs::remove_dir_all(directory).expect("the directory can be removed");
     }
 }
