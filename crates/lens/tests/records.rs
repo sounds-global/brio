@@ -984,16 +984,12 @@ fn unfinished_file(record: &Path, process: &str, writer: &str) -> PathBuf {
     record.with_extension(format!("{process}-{writer}.unfinished"))
 }
 
-/// Runs `reader` beside four of `writer`, each given its number, until all
-/// are done.
-fn beside_four_writers(writer: impl Fn(usize) + Sync, reader: impl FnOnce() + Send) {
-    let writer = &writer;
-    std::thread::scope(|scope| {
-        for number in 0..4 {
-            scope.spawn(move || writer(number));
-        }
-        scope.spawn(reader);
-    });
+/// The file of every unfinished record that a writer of this process can
+/// keep for the record of the file `record`: one for each writer the
+/// process has, and it has fewer than these in the whole of these tests.
+fn unfinished_files_of_this_process(record: &Path) -> impl Iterator<Item = PathBuf> {
+    let process = std::process::id().to_string();
+    (0..2000).map(move |writer| unfinished_file(record, &process, &writer.to_string()))
 }
 
 #[test]
@@ -1054,7 +1050,7 @@ fn a_reader_beside_writers_of_a_record_is_always_given_that_record() {
     let inputs = inputs("sensor a\n");
     write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
 
-    let write_often = |_writer| {
+    let write_often = || {
         for _ in 0..200 {
             write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
         }
@@ -1068,43 +1064,58 @@ fn a_reader_beside_writers_of_a_record_is_always_given_that_record() {
             assert!(records[0].is_ok(), "{records:?}");
         }
     };
-    beside_four_writers(write_often, read_often);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(write_often);
+        }
+        scope.spawn(read_often);
+    });
 }
 
 #[test]
-fn a_reader_beside_writers_of_new_records_is_given_no_error_and_loses_no_record() {
-    let build_directory = workspace("reader_beside_writers").join(".brio");
+fn writing_a_record_again_leaves_the_file_that_is_there() {
+    let workspace = workspace("written_again");
+    let build_directory = workspace.join(".brio");
     let stage = stage::<Probe>("app::main");
-    write_record(
-        &build_directory,
-        &stage,
-        &inputs("sensor a\n"),
-        &probe(&[("a", 7)]),
-    );
+    let inputs = inputs("sensor a\n");
+    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+    // Another name of the file the record is in.
+    let same_file = workspace.join("same-file");
+    fs::hard_link(&path, &same_file).expect("the record can be given a second name");
 
-    let write_new_records = |writer: usize| {
-        for record in 0..25 {
-            let inputs = inputs(&format!("sensor a\n# {writer} {record}\n"));
-            write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
-        }
-    };
-    let read_often = || {
-        let reader = RecordReader::in_build_directory(&build_directory);
-        let mut read_before = 1;
-        for _ in 0..50 {
-            let records = reader.read_all().expect("the records are read");
-            // What a writer has not finished is never taken for a record,
-            // or for a file that is not one.
-            let errors: Vec<&ReadError> = records
-                .iter()
-                .filter_map(|record| record.as_ref().err())
-                .collect();
-            assert!(errors.is_empty(), "{errors:?}");
-            assert!(records.len() >= read_before);
-            read_before = records.len();
-        }
-    };
-    beside_four_writers(write_new_records, read_often);
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+
+    // The record is still in that file, and no other took its place: what
+    // is written under the other name is read under the name of the record.
+    fs::write(&same_file, "the same file\n").expect("the file can be written");
+    assert_eq!(
+        fs::read_to_string(&path).expect("the record can be read"),
+        "the same file\n"
+    );
+    assert_eq!(files_under(&build_directory), [path]);
+}
+
+#[test]
+fn a_writer_keeps_its_unfinished_record_under_a_name_that_readers_pass_over() {
+    let build_directory = workspace("unfinished_name").join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+    let whole = fs::read(&path).expect("the record can be read");
+    // Every name a writer of this process can keep its unfinished record
+    // under is taken, by what no writer can make its file of.
+    for taken in unfinished_files_of_this_process(&path) {
+        fs::create_dir(taken).expect("a directory can be added");
+    }
+
+    // The same record key, and another payload: the record is to be
+    // replaced, so the writer needs its unfinished record.
+    let error = RecordWriter::in_build_directory(&build_directory)
+        .write(&stage, || &inputs, &probe(&[("a", 8)]))
+        .expect_err("the writer has nowhere to keep its unfinished record");
+
+    assert!(matches!(error, WriteError::Io { .. }));
+    assert_eq!(fs::read(&path).expect("the record can be read"), whole);
 }
 
 #[test]
@@ -1124,7 +1135,7 @@ fn writing_a_record_again_puts_it_in_the_place_of_a_corrupted_one() {
 }
 
 #[test]
-fn a_record_is_never_written_through_a_name_a_stopped_writer_left() {
+fn a_name_a_stopped_writer_left_is_never_written_through_and_is_passed_over() {
     let workspace = workspace("stopped_writer");
     let build_directory = workspace.join(".brio");
     let stage = stage::<Probe>("app::main");
@@ -1137,9 +1148,7 @@ fn a_record_is_never_written_through_a_name_a_stopped_writer_left() {
     // What a writer leaves when it is stopped once its record is in place:
     // its unfinished name, still a name of the record. The next writers of
     // this process make the same names.
-    for writer in 0..2000 {
-        let process = std::process::id().to_string();
-        let left = unfinished_file(&path, &process, &writer.to_string());
+    for left in unfinished_files_of_this_process(&path) {
         fs::hard_link(&path, left).expect("the record can be given a second name");
     }
 
@@ -1151,4 +1160,10 @@ fn a_record_is_never_written_through_a_name_a_stopped_writer_left() {
         whole
     );
     assert_ne!(fs::read(&path).expect("the record can be read"), whole);
+    // A reader passes over every name that is left, and is given the record.
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].is_ok(), "{records:?}");
 }
