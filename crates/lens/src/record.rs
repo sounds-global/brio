@@ -69,8 +69,8 @@ fn records_directory(build_directory: PathBuf) -> PathBuf {
 
 /// What ends the name of the file of a record, after its record key.
 const RECORD_SUFFIX: &str = ".json";
-/// The extension of the file of a record its writer has not finished.
-const UNFINISHED: &str = "unfinished";
+/// What ends the name of the file of a record its writer has not finished.
+const UNFINISHED_SUFFIX: &str = ".unfinished";
 
 /// Where the record with `key` is kept.
 fn record_path(records_directory: &Path, key: &RecordKey) -> PathBuf {
@@ -80,9 +80,31 @@ fn record_path(records_directory: &Path, key: &RecordKey) -> PathBuf {
 /// The record key that the file `file` is named for, or `None` when it is
 /// not named as a record: a record is stored under its record key and under
 /// no other name.
-fn stored_under(file: &Path) -> Option<RecordKey> {
+fn record_key_of(file: &Path) -> Option<RecordKey> {
     let key = file.file_name()?.to_str()?.strip_suffix(RECORD_SUFFIX)?;
     RecordKey::from_hex(key.to_owned())
+}
+
+/// Where the writer `writer` of this process keeps the record with `key`
+/// until it is complete. The name is that writer's alone.
+fn unfinished_path(records_directory: &Path, key: &RecordKey, writer: u64) -> PathBuf {
+    let process = std::process::id();
+    records_directory.join(format!("{key}.{process}-{writer}{UNFINISHED_SUFFIX}"))
+}
+
+/// Whether `file` is named as [`unfinished_path`] names a record that a
+/// writer, of any process, has not finished.
+fn is_unfinished(file: &Path) -> bool {
+    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let name = file.file_name().and_then(|name| name.to_str());
+    name.and_then(|name| name.strip_suffix(UNFINISHED_SUFFIX))
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(key, writer)| {
+            let numbered = writer
+                .split_once('-')
+                .is_some_and(|(process, writer)| is_number(process) && is_number(writer));
+            numbered && RecordKey::from_hex(key.to_owned()).is_some()
+        })
 }
 
 /// Writes records into a build directory, or, when Lens is off, drops them.
@@ -155,11 +177,11 @@ impl RecordWriter {
         // name only once it is complete. Its name until then is its
         // writer's alone, so two writers of one record never share it.
         static WRITES: AtomicU64 = AtomicU64::new(0);
-        let unfinished = path.with_extension(format!(
-            "{}-{}.{UNFINISHED}",
-            std::process::id(),
-            WRITES.fetch_add(1, Ordering::Relaxed)
-        ));
+        let unfinished = unfinished_path(
+            directory,
+            envelope.key(),
+            WRITES.fetch_add(1, Ordering::Relaxed),
+        );
         fs::create_dir_all(directory)
             .and_then(|()| fs::write(&unfinished, text))
             .and_then(|()| fs::rename(&unfinished, &path))
@@ -272,10 +294,11 @@ impl RecordReader {
     /// Every record in the build directory, each with an untyped payload, in
     /// the order of their file names. A record that cannot be read is given
     /// as its error, in its place, and hides no other record. So is anything
-    /// else in the records of the build directory that is not named as a
-    /// record: a reader is never given a record set with a record missing
-    /// as if it were whole. Only a record its writer has not finished is
-    /// passed over: it is no record yet.
+    /// else among the records of the build directory that is not named as a
+    /// record, as [`RecordDefect::Misnamed`]: a reader is never given the
+    /// records of a build directory with one missing as if they were whole.
+    /// Only a record its writer has not finished is passed over: it is no
+    /// record yet.
     ///
     /// This reads records of any payload kind, including those of payload
     /// types the caller does not know. It does not know the inputs of any
@@ -296,21 +319,18 @@ impl RecordReader {
         let mut paths = Vec::new();
         for entry in fs::read_dir(&self.directory).map_err(io_error)? {
             let path = entry.map_err(io_error)?.path();
-            let unfinished = path
-                .extension()
-                .is_some_and(|extension| extension == UNFINISHED);
-            if !unfinished {
+            if !is_unfinished(&path) {
                 paths.push(path);
             }
         }
         paths.sort();
 
         let read = |path: &PathBuf| {
-            let stored_under = stored_under(path).ok_or_else(|| ReadError::Defective {
+            let key = record_key_of(path).ok_or_else(|| ReadError::Defective {
                 path: path.clone(),
-                defect: RecordDefect::Corrupted,
+                defect: RecordDefect::Misnamed,
             })?;
-            read_record(path, &stored_under)
+            read_record(path, &key)
         };
         Ok(paths.iter().map(read).collect())
     }
