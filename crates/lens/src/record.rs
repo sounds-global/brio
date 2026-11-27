@@ -349,7 +349,7 @@ impl fmt::Display for ReadError {
             ),
             Self::InvalidPayload { payload_kind, key } => write!(
                 f,
-                "the payload of the `{payload_kind}` record `{key}` is not a `{payload_kind}` \
+                "the elements of the `{payload_kind}` record `{key}` are not a `{payload_kind}` \
                  payload"
             ),
         }

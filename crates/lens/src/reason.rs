@@ -3,7 +3,8 @@
 //! Reasons: why a phase decided what it decided.
 
 use crate::json::{Map, Value, json};
-use crate::provenance::{self, list_from_json, list_schema, object_schema};
+use crate::provenance::{self, list_from_json};
+use crate::schema::{list_schema, object_schema, text_schema};
 use crate::{ElementLink, envelope};
 
 /// The JSON name of the decision of a reason.
@@ -87,10 +88,7 @@ pub(crate) fn schema() -> Value {
         &[
             (
                 DECISION,
-                json!({
-                    "description": "The phase's name for what it decided.",
-                    "type": "string"
-                }),
+                text_schema("The phase's name for what it decided."),
             ),
             (
                 BECAUSE,

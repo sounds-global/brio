@@ -851,3 +851,71 @@ fn a_record_whose_element_table_breaks_its_rules_is_rejected_even_with_a_matchin
         );
     }
 }
+
+/// A payload that is the elements of another record, as they were read.
+struct Copied(Vec<Element>);
+
+impl PayloadType for Copied {
+    const KIND: &'static str = "loose";
+    const VERSION: u32 = 1;
+
+    fn schema_fragment() -> Value {
+        json!({})
+    }
+}
+
+impl Payload for Copied {
+    fn to_elements(&self, _stage: &Stage<Self>) -> Vec<Element> {
+        self.0.clone()
+    }
+
+    fn from_elements(elements: &ElementTable) -> Option<Self> {
+        // Each parent before its children, in their order.
+        let mut ordered = Vec::new();
+        let mut next: Vec<_> = elements.roots().iter().rev().collect();
+        while let Some(id) = next.pop() {
+            let element = elements.get(id)?;
+            next.extend(element.children().iter().rev());
+            ordered.push(element.clone());
+        }
+        Some(Self(ordered))
+    }
+}
+
+#[test]
+fn elements_read_from_a_record_can_be_written_again_and_read_back() {
+    let build_directory = workspace("rewritten").join(".brio");
+    let writer = RecordWriter::in_build_directory(&build_directory);
+    let reader = RecordReader::in_build_directory(&build_directory);
+    let inputs = inputs("sensor a\n");
+    writer
+        .write(&stage::<Loose>("app::main"), &inputs, &Loose(outline))
+        .expect("the record is written");
+    // The elements as read: each parent already lists its children.
+    let copied = stage::<Copied>("app::main");
+    let read = reader.read(&copied, &inputs).expect("the record is read");
+    let document = copied.id(&["document"]);
+    assert_eq!(
+        read.envelope
+            .elements()
+            .get(&document)
+            .map(|e| e.children().len()),
+        Some(2)
+    );
+
+    writer
+        .write(&copied, &inputs, &read.payload)
+        .expect("the record is written again");
+    let again = reader
+        .read(&copied, &inputs)
+        .expect("the record is read again");
+
+    let children = |record: &brio_lens::Record<Copied>| {
+        record
+            .envelope
+            .elements()
+            .get(&document)
+            .map(|e| e.children().to_vec())
+    };
+    assert_eq!(children(&again), children(&read));
+}

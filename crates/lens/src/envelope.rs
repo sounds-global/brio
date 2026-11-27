@@ -13,7 +13,7 @@ use std::fmt;
 use crate::json::{Map, Value, json};
 
 use crate::payload::{self, InvalidPayloadKind, Payload, PayloadType};
-use crate::schema::reference;
+use crate::schema::{list_schema, reference};
 use crate::{
     Element, ElementTable, PayloadSchema, Reason, RecordInputs, RecordKey, SourceSpan, StableId,
     Stage, canonical, element, hash, provenance, reason,
@@ -174,7 +174,7 @@ impl Envelope {
             .get(PAYLOAD_VERSION)
             .and_then(Value::as_u64)
             .and_then(|version| u32::try_from(version).ok())?;
-        if is_absolute_path(&module) || !payload::is_kind(&payload_kind) {
+        if !names_a_stage(&module, &payload_kind) {
             return None;
         }
         // A table meets the rules when it is the table Lens makes from its
@@ -212,6 +212,12 @@ impl Envelope {
     }
 }
 
+/// Whether a stage can have the name `module` and the payload kind
+/// `payload_kind`: what a record, or a link to an element, says of its stage.
+pub(crate) fn names_a_stage(module: &str, payload_kind: &str) -> bool {
+    !is_absolute_path(module) && payload::is_kind(payload_kind)
+}
+
 /// The payload kind of `P`, when `P` and `module` can enter Lens as a stage.
 pub(crate) fn admit<P: PayloadType>(module: &str) -> Result<&'static str, RecordRefusal> {
     let payload_kind = payload::kind_of::<P>()?;
@@ -232,8 +238,11 @@ pub(crate) fn admit<P: PayloadType>(module: &str) -> Result<&'static str, Record
 fn table_of(elements: Vec<Element>) -> Result<ElementTable, RecordRefusal> {
     let mut table = ElementTable::default();
     let mut parents = Vec::with_capacity(elements.len());
-    for element in elements {
+    for mut element in elements {
         admit_element(&element)?;
+        // The children are worked out here, from the parents alone: an
+        // element read from another record still lists the ones it had.
+        element.children.clear();
         let id = element.id.clone();
         parents.push((id.clone(), element.parent.clone()));
         if table.elements.insert(id.clone(), element).is_some() {
@@ -306,7 +315,7 @@ fn outside_every_root(table: &ElementTable) -> Option<StableId> {
 }
 
 /// The elements of `table` as a stage would produce them: each parent before
-/// its children, in their order, and without the children Lens works out.
+/// its children, in their order.
 ///
 /// `None` when the lists of `table` name an element it does not have, or
 /// name more elements than it has.
@@ -320,10 +329,7 @@ fn in_order(table: &ElementTable) -> Option<Vec<Element>> {
         }
         let element = elements.get(id)?;
         next.extend(element.children.iter().rev());
-        ordered.push(Element {
-            children: Vec::new(),
-            ..element.clone()
-        });
+        ordered.push(element.clone());
     }
     Some(ordered)
 }
@@ -331,12 +337,12 @@ fn in_order(table: &ElementTable) -> Option<Vec<Element>> {
 /// Whether `name` is an absolute path, on any platform: from a root (`/…`,
 /// `\…`), a home directory (`~…`) or a drive (`C:\…`).
 pub(crate) fn is_absolute_path(name: &str) -> bool {
-    let module = name.as_bytes();
-    let from_a_drive = module.len() >= 3
-        && module[0].is_ascii_alphabetic()
-        && module[1] == b':'
-        && matches!(module[2], b'/' | b'\\');
-    matches!(module.first(), Some(b'/' | b'\\' | b'~')) || from_a_drive
+    let name = name.as_bytes();
+    let from_a_drive = name.len() >= 3
+        && name[0].is_ascii_alphabetic()
+        && name[1] == b':'
+        && matches!(name[2], b'/' | b'\\');
+    matches!(name.first(), Some(b'/' | b'\\' | b'~')) || from_a_drive
 }
 
 /// Why Lens refuses a stage, or the record of what it produced.
@@ -527,11 +533,10 @@ pub(crate) fn schema() -> Value {
     );
     properties.insert(
         ROOTS.to_owned(),
-        json!({
-            "description": "The elements that are inside no other, in their order.",
-            "type": "array",
-            "items": id
-        }),
+        list_schema(
+            "The elements that are inside no other, in their order.",
+            element::ID_DEFINITION,
+        ),
     );
     properties.insert(
         ELEMENTS.to_owned(),

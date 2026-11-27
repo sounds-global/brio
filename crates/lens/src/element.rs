@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use crate::json::{Map, Value, json};
-use crate::provenance::{self, OriginStep, Provenance, list_from_json, list_schema, object_schema};
-use crate::schema::reference;
+use crate::provenance::{self, OriginStep, Provenance, list_from_json};
+use crate::schema::{list_schema, object_schema, reference};
 use crate::{ElementLink, Reason, SourceSpan, StableId, reason};
 
 /// The JSON name of the parent of an element.

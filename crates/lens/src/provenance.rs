@@ -3,8 +3,8 @@
 //! Provenance: where an element of a record comes from.
 
 use crate::json::{Map, Value, json};
-use crate::schema::reference;
-use crate::{Element, Envelope, StableId, element, envelope, payload};
+use crate::schema::{list_schema, object_schema, reference, text_schema};
+use crate::{Element, Envelope, StableId, element, envelope};
 
 /// The JSON name of the source spans of a provenance.
 const SOURCE: &str = "source";
@@ -110,6 +110,10 @@ impl ElementLink {
     /// or `None` when none of them holds it.
     ///
     /// The records can be of any payload type, known to the caller or not.
+    /// They are the records of one build: a link does not say which inputs
+    /// its record was computed from, so among records of the same stage and
+    /// module from several builds it leads to the first that holds the
+    /// element.
     pub fn resolve<'a>(
         &self,
         envelopes: impl IntoIterator<Item = &'a Envelope>,
@@ -139,7 +143,7 @@ impl ElementLink {
     pub(crate) fn from_json(link: &Value) -> Option<Self> {
         let module = link.get(MODULE)?.as_str()?;
         let payload_kind = link.get(PAYLOAD_KIND)?.as_str()?;
-        if envelope::is_absolute_path(module) || !payload::is_kind(payload_kind) {
+        if !envelope::names_a_stage(module, payload_kind) {
             return None;
         }
         Some(Self::new(
@@ -260,33 +264,6 @@ const SPAN_DEFINITION: &str = "source_span";
 /// The name of the definition of a step of a chain of origin in the
 /// published schema.
 const STEP_DEFINITION: &str = "origin_step";
-
-/// A JSON Schema of an object with `description`, in which every one of
-/// `properties` is required.
-pub(crate) fn object_schema(description: &str, properties: &[(&str, Value)]) -> Value {
-    let required: Vec<&str> = properties.iter().map(|(name, _)| *name).collect();
-    let properties: Map<String, Value> = properties
-        .iter()
-        .map(|(name, schema)| ((*name).to_owned(), schema.clone()))
-        .collect();
-    json!({
-        "description": description,
-        "type": "object",
-        "required": required,
-        "properties": properties
-    })
-}
-
-/// A JSON Schema of a list with `description`, of items that each meet the
-/// definition called `item`.
-pub(crate) fn list_schema(description: &str, item: &str) -> Value {
-    json!({ "description": description, "type": "array", "items": reference(item) })
-}
-
-/// A JSON Schema of a text with `description`.
-fn text_schema(description: &str) -> Value {
-    json!({ "description": description, "type": "string" })
-}
 
 /// A JSON Schema of a count of bytes with `description`.
 fn offset_schema(description: &str) -> Value {

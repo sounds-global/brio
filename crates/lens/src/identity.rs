@@ -33,16 +33,14 @@ impl StableId {
         Self(hash::hex(&hasher.finish()[..16]))
     }
 
-    /// This identifier as JSON, for a payload to write.
-    #[must_use]
-    pub fn to_json(&self) -> Value {
+    /// This identifier as it is written in a record.
+    pub(crate) fn to_json(&self) -> Value {
         Value::from(self.0.as_str())
     }
 
     /// The identifier that [`StableId::to_json`] wrote as `value`, or `None`
     /// when `value` is not an identifier.
-    #[must_use]
-    pub fn from_json(value: &Value) -> Option<Self> {
+    pub(crate) fn from_json(value: &Value) -> Option<Self> {
         let text = value.as_str()?;
         hash::is_hex(text, 32).then(|| Self(text.to_owned()))
     }

@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::json::{Value, json};
+use crate::json::{Map, Value, json};
 
 use crate::{Envelope, PayloadSchema, canonical, envelope};
 
@@ -120,4 +120,31 @@ impl Schema {
 /// A reference, in the published schema, to the definition called `name`.
 pub(crate) fn reference(name: &str) -> Value {
     json!({ "$ref": format!("#/$defs/{name}") })
+}
+
+/// A JSON Schema of an object with `description`, in which every one of
+/// `properties` is required.
+pub(crate) fn object_schema(description: &str, properties: &[(&str, Value)]) -> Value {
+    let required: Vec<&str> = properties.iter().map(|(name, _)| *name).collect();
+    let properties: Map<String, Value> = properties
+        .iter()
+        .map(|(name, schema)| ((*name).to_owned(), schema.clone()))
+        .collect();
+    json!({
+        "description": description,
+        "type": "object",
+        "required": required,
+        "properties": properties
+    })
+}
+
+/// A JSON Schema of a list with `description`, of items that each meet the
+/// definition called `item`.
+pub(crate) fn list_schema(description: &str, item: &str) -> Value {
+    json!({ "description": description, "type": "array", "items": reference(item) })
+}
+
+/// A JSON Schema of a text with `description`.
+pub(crate) fn text_schema(description: &str) -> Value {
+    json!({ "description": description, "type": "string" })
 }
