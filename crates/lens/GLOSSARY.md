@@ -76,6 +76,10 @@ _Avoid_: placeholder, redaction
 The record writer of a build with **Lens** off. It drops every record and does no work for it: it asks for neither the inputs of a record nor the elements of its payload.
 _Avoid_: null writer, no-op writer
 
+**Unfinished record**:
+A record its writer is still writing, in a file with a name of that writer's alone. It gets the name of a record only once it is complete, so no reader is given half a record, and a reader passes it over until then.
+_Avoid_: temporary file, partial record
+
 **Stage test**:
 A comparison of a test program's **Stage records** against reviewed reference records: a set of **Produced records** against a set of **Reference records**.
 _Avoid_: snapshot test, golden test

@@ -6,7 +6,7 @@
 mod support;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use brio_lens::json::{Value, json};
 use brio_lens::{
@@ -489,19 +489,25 @@ fn a_record_that_cannot_be_read_hides_no_other_record() {
         .map(|record| record.envelope.payload_kind())
         .collect();
     assert_eq!(whole, ["gauge"]);
-    let corrupted = records
-        .iter()
-        .filter(|record| {
-            matches!(
-                record,
-                Err(ReadError::Defective {
-                    defect: RecordDefect::Corrupted,
-                    ..
-                })
-            )
-        })
-        .count();
-    assert_eq!(corrupted, 2);
+    let count = |is_counted: fn(&ReadError) -> bool| {
+        let errors = records.iter().filter_map(|record| record.as_ref().err());
+        errors.filter(|error| is_counted(error)).count()
+    };
+    let corrupted = count(|error| {
+        matches!(
+            error,
+            ReadError::Defective {
+                defect: RecordDefect::Corrupted,
+                ..
+            }
+        )
+    });
+    assert_eq!(corrupted, 1);
+    assert_eq!(
+        count(|error| matches!(error, ReadError::NotARecord { .. })),
+        1
+    );
+    assert_eq!(records.len(), 3);
 }
 
 /// A payload of one element, whose payload is arrays nested inside each
@@ -926,4 +932,202 @@ fn the_disabled_writer_does_no_work_for_a_record() {
         .expect("nothing is refused");
 
     assert_eq!(written, None);
+}
+
+#[test]
+fn a_file_that_is_not_named_as_a_record_is_given_as_an_error_and_hides_no_other_record() {
+    let build_directory = workspace("misnamed").join(".brio");
+    let inputs = inputs("sensor a\n");
+    let probe_record = write_record(
+        &build_directory,
+        &stage::<Probe>("app::main"),
+        &inputs,
+        &probe(&[("a", 7)]),
+    );
+    write_record(
+        &build_directory,
+        &stage::<Gauge>("app::main"),
+        &inputs,
+        &Gauge("steady".to_owned()),
+    );
+    let misnamed = probe_record.with_extension("JSON");
+    fs::rename(&probe_record, &misnamed).expect("the record can be renamed");
+    let foreign = probe_record.with_file_name("notes.txt");
+    fs::write(&foreign, "not a record\n").expect("a foreign file can be added");
+
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+
+    // Each file gives a record or an error, in the order of the file names.
+    let mut files = files_under(&build_directory);
+    files.sort();
+    let expected: Vec<Option<&PathBuf>> = files
+        .iter()
+        .map(|file| (*file == misnamed || *file == foreign).then_some(file))
+        .collect();
+    let not_records: Vec<Option<&PathBuf>> = records
+        .iter()
+        .map(|record| match record {
+            Err(ReadError::NotARecord { path }) => Some(path),
+            Ok(_) => None,
+            Err(other) => panic!("a file is read in an unexpected way: {other}"),
+        })
+        .collect();
+    assert_eq!(not_records, expected);
+    assert_eq!(not_records.iter().flatten().count(), 2);
+}
+
+/// The file of the unfinished record with the number `number` in the
+/// process `process`, for the record of the file `record`.
+fn unfinished_record(record: &Path, process: &str, number: &str) -> PathBuf {
+    record.with_extension(format!("{process}-{number}.unfinished"))
+}
+
+#[test]
+fn a_record_that_a_writer_has_not_finished_is_no_record_yet() {
+    let build_directory = workspace("unfinished").join(".brio");
+    let path = write_record(
+        &build_directory,
+        &stage::<Probe>("app::main"),
+        &inputs("sensor a\n"),
+        &probe(&[("a", 7)]),
+    );
+    // What a writer of the same record leaves until its record is complete.
+    fs::write(unfinished_record(&path, "4242", "0"), "{\n  \"dig")
+        .expect("an unfinished record can be added");
+
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+
+    assert_eq!(records.len(), 1);
+    assert!(records[0].is_ok());
+}
+
+#[test]
+fn a_file_named_as_unfinished_that_no_writer_made_is_given_as_an_error() {
+    let build_directory = workspace("unfinished_by_no_writer").join(".brio");
+    let path = write_record(
+        &build_directory,
+        &stage::<Probe>("app::main"),
+        &inputs("sensor a\n"),
+        &probe(&[("a", 7)]),
+    );
+    fs::rename(&path, path.with_extension("unfinished")).expect("the record can be renamed");
+    for (name, text) in [
+        ("notes.4242-0.unfinished", "not a record\n"),
+        ("4242-0.unfinished", ""),
+    ] {
+        fs::write(path.with_file_name(name), text).expect("a foreign file can be added");
+    }
+    // No process has so high a number, and no writer keeps a directory.
+    fs::write(unfinished_record(&path, "99999999999", "0"), "")
+        .expect("a foreign file can be added");
+    fs::create_dir(unfinished_record(&path, "4242", "1")).expect("a directory can be added");
+
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+
+    assert_eq!(records.len(), 5);
+    for record in &records {
+        assert!(matches!(record, Err(ReadError::NotARecord { .. })));
+    }
+}
+
+#[test]
+fn a_reader_beside_writers_of_a_record_is_always_given_that_record() {
+    let build_directory = workspace("reader_beside_rewriters").join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+
+    let write_often = || {
+        for _ in 0..200 {
+            write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+        }
+    };
+    let read_often = || {
+        let reader = RecordReader::in_build_directory(&build_directory);
+        for _ in 0..200 {
+            let records = reader.read_all().expect("the records are read");
+            // A record that is written again is never gone for a moment.
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert!(records[0].is_ok(), "{records:?}");
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(write_often);
+        }
+        scope.spawn(read_often);
+    });
+}
+
+#[test]
+fn writing_a_record_again_leaves_the_file_that_is_there() {
+    let workspace = workspace("written_again");
+    let build_directory = workspace.join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+    // Another name of the file the record is in.
+    let same_file = workspace.join("same-file");
+    fs::hard_link(&path, &same_file).expect("the record can be given a second name");
+
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+
+    // The record is still in that file, and no other took its place: what
+    // is written under the other name is read under the name of the record.
+    fs::write(&same_file, "the same file\n").expect("the file can be written");
+    assert_eq!(
+        fs::read_to_string(&path).expect("the record can be read"),
+        "the same file\n"
+    );
+    assert_eq!(files_under(&build_directory), [path]);
+}
+
+#[test]
+fn writing_a_record_again_puts_it_in_the_place_of_a_corrupted_one() {
+    let workspace = workspace("written_over_corrupted");
+    let build_directory = workspace.join(".brio");
+    let stage = stage::<Probe>("app::main");
+    let inputs = inputs("sensor a\n");
+    let path = write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+    let whole = fs::read(&path).expect("the record can be read");
+    tamper(&path, r#""value": 7"#, r#""value": 8"#);
+
+    write_record(&build_directory, &stage, &inputs, &probe(&[("a", 7)]));
+
+    assert_eq!(fs::read(&path).expect("the record can be read"), whole);
+    assert_eq!(files_under(&workspace), [path]);
+}
+
+#[test]
+fn a_hidden_file_and_a_directory_among_the_records_are_given_as_errors() {
+    let build_directory = workspace("hidden_file_and_directory").join(".brio");
+    let path = write_record(
+        &build_directory,
+        &stage::<Probe>("app::main"),
+        &inputs("sensor a\n"),
+        &probe(&[("a", 7)]),
+    );
+    fs::write(path.with_file_name(".gitkeep"), "").expect("a hidden file can be added");
+    fs::create_dir(path.with_file_name("kept")).expect("a directory can be added");
+    // A directory with the name of a record is not the file of one.
+    let named_as_a_record = path.with_file_name(format!("{}.json", "0".repeat(64)));
+    fs::create_dir(named_as_a_record).expect("a directory can be added");
+
+    let records = RecordReader::in_build_directory(&build_directory)
+        .read_all()
+        .expect("the records are read");
+
+    let not_records = records
+        .iter()
+        .filter(|record| matches!(record, Err(ReadError::NotARecord { .. })))
+        .count();
+    assert_eq!(not_records, 3);
+    assert_eq!(records.iter().flatten().count(), 1);
+    assert_eq!(records.len(), 4);
 }

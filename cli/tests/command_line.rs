@@ -390,13 +390,14 @@ fn record_sets(test: &str) -> PathBuf {
 }
 
 /// Writes into the record set in `directory` the record of what the probe
-/// stage produced for `module`, with the toolchain `toolchain_version`.
+/// stage produced for `module`, with the toolchain `toolchain_version`, and
+/// gives the file of the record.
 fn write_record(
     directory: &Path,
     module: &str,
     toolchain_version: &str,
     sensors: &[(&'static str, i64)],
-) {
+) -> PathBuf {
     let inputs = RecordInputs {
         module_inputs: BTreeMap::new(),
         toolchain_version: toolchain_version.to_owned(),
@@ -405,7 +406,8 @@ fn write_record(
     };
     RecordWriter::in_build_directory(directory)
         .write(&probe_stage(module), || &inputs, &Probe(sensors.to_vec()))
-        .expect("the record is written");
+        .expect("the record is written")
+        .expect("the writer is not the disabled writer")
 }
 
 fn lens_test(produced: &Path, reference: &Path) -> Output {
@@ -491,13 +493,7 @@ fn lens_test_is_an_error_when_a_record_cannot_be_read() {
     let sets = record_sets("lens_test_corrupted");
     let (produced, reference) = (sets.join("produced"), sets.join("reference"));
     write_record(&reference, "app::main", "0.1.0", &[("a", 1)]);
-    write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
-    let record = fs::read_dir(produced.join("lens"))
-        .expect("the records can be listed")
-        .next()
-        .expect("the set has a record")
-        .expect("the record can be listed")
-        .path();
+    let record = write_record(&produced, "app::main", "0.1.0", &[("a", 1)]);
     fs::write(&record, "{}\n").expect("the record can be changed");
 
     let output = lens_test(&produced, &reference);
@@ -547,5 +543,36 @@ fn lens_test_is_an_error_when_a_record_set_holds_the_records_of_two_builds() {
         stderr(&output),
         "brio: the produced records hold two `probe` records of module `app::main`: the set \
          holds the records of more than one build\n"
+    );
+}
+
+#[test]
+fn lens_test_is_an_error_when_a_record_is_misnamed_in_both_record_sets() {
+    let sets = record_sets("lens_test_misnamed");
+    let (produced, reference) = (sets.join("produced"), sets.join("reference"));
+    // The record of one stage differs between the sets, and is misnamed in
+    // both.
+    let misnamed_record = |set: &Path, value: i64| {
+        let record = write_record(set, "app::main", "0.1.0", &[("a", value)]);
+        let misnamed = record.with_extension("JSON");
+        fs::rename(&record, &misnamed).expect("the record can be renamed");
+        misnamed
+    };
+    let misnamed = misnamed_record(&produced, 1);
+    misnamed_record(&reference, 2);
+    // Another stage, the same in both sets.
+    write_record(&produced, "app::motor", "0.1.0", &[("e", 1)]);
+    write_record(&reference, "app::motor", "0.1.0", &[("e", 1)]);
+
+    let output = lens_test(&produced, &reference);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "brio: `{}` is among the records and is not the file of a record\n",
+            misnamed.display()
+        )
     );
 }
